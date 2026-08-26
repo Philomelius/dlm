@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import curses
 from datetime import datetime
 import http.cookiejar
 import json
@@ -44,6 +45,8 @@ ANSI_CYAN = "\033[96m"
 ANSI_MAGENTA = "\033[95m"
 ANSI_YELLOW = "\033[93m"
 ANSI_WHITE = "\033[97m"
+TUI_MIN_WIDTH = 74
+TUI_MIN_HEIGHT = 12
 QUEUE_PREFERENCES = {
     "queueing_enabled": True,
     "max_active_downloads": 1,
@@ -330,14 +333,7 @@ def filtered_torrents(qbit: QBittorrent, active_only: bool) -> list[dict]:
 
 
 def show_list(qbit: QBittorrent, ids: TorrentIds, active_only: bool) -> None:
-    torrents = filtered_torrents(qbit, active_only)
-    id_map = ids.sync(torrents)
-    torrents.sort(
-        key=lambda torrent: (
-            initial_order(torrent),
-            id_map[str(torrent.get("hash") or "").casefold()],
-        )
-    )
+    torrents, id_map = list_torrents(qbit, ids, active_only)
     print(
         styled(
             f"DLM — {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}",
@@ -348,7 +344,371 @@ def show_list(qbit: QBittorrent, ids: TorrentIds, active_only: bool) -> None:
     print(torrent_table(torrents, id_map))
 
 
+def list_torrents(
+    qbit: QBittorrent, ids: TorrentIds, active_only: bool
+) -> tuple[list[dict], dict[str, int]]:
+    torrents = filtered_torrents(qbit, active_only)
+    id_map = ids.sync(torrents)
+    torrents.sort(
+        key=lambda torrent: (
+            initial_order(torrent),
+            id_map[str(torrent.get("hash") or "").casefold()],
+        )
+    )
+    return torrents, id_map
+
+
+def tui_rows(
+    torrents: list[dict], ids: dict[str, int], width: int
+) -> tuple[list[dict | None], int, int]:
+    """Build scrollable display rows without embedding terminal control codes."""
+    id_width = max(2, max((len(str(value)) for value in ids.values()), default=1))
+    prefix_width = id_width + 51
+    name_width = max(10, width - prefix_width)
+    rows: list[dict | None] = []
+    for index, torrent in enumerate(torrents):
+        torrent_id = ids[str(torrent.get("hash") or "").casefold()]
+        wrapped_name = textwrap.wrap(
+            str(torrent.get("name") or ""),
+            width=name_width,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""]
+        common = {
+            "id": f"{torrent_id:>{id_width}}",
+            "done": f"{float(torrent.get('progress') or 0) * 100:6.2f}%",
+            "total": f"{format_bytes(torrent.get('size') or 0):>10}",
+            "down": f"{format_rate(torrent.get('dlspeed') or 0):>10}",
+            "up": f"{format_rate(torrent.get('upspeed') or 0):>10}",
+            "eta": f"{format_eta(torrent.get('eta')):>8}",
+            "active": bool(
+                int(torrent.get("dlspeed") or 0) + int(torrent.get("upspeed") or 0)
+            ),
+        }
+        rows.append({**common, "name": wrapped_name[0], "continuation": False})
+        rows.extend(
+            {
+                **common,
+                "name": line,
+                "continuation": True,
+            }
+            for line in wrapped_name[1:]
+        )
+        if index < len(torrents) - 1:
+            rows.append(None)
+    return rows, id_width, prefix_width
+
+
+def tui_attributes() -> dict[str, int]:
+    attributes = {
+        "border": curses.A_DIM,
+        "title": curses.A_BOLD,
+        "header": curses.A_BOLD,
+        "id": curses.A_BOLD,
+        "done": 0,
+        "total": 0,
+        "down": curses.A_BOLD,
+        "up": 0,
+        "eta": 0,
+        "name": 0,
+        "footer": curses.A_BOLD,
+        "error": curses.A_BOLD,
+    }
+    if "NO_COLOR" in os.environ or not curses.has_colors():
+        return attributes
+    curses.start_color()
+    try:
+        curses.use_default_colors()
+        background = -1
+    except curses.error:
+        background = curses.COLOR_BLACK
+    colors = {
+        "border": curses.COLOR_CYAN,
+        "title": curses.COLOR_CYAN,
+        "header": curses.COLOR_CYAN,
+        "id": curses.COLOR_BLUE,
+        "done": curses.COLOR_GREEN,
+        "total": curses.COLOR_CYAN,
+        "down": curses.COLOR_GREEN,
+        "up": curses.COLOR_MAGENTA,
+        "eta": curses.COLOR_YELLOW,
+        "name": curses.COLOR_WHITE,
+        "footer": curses.COLOR_CYAN,
+        "error": curses.COLOR_RED,
+    }
+    for pair, (key, foreground) in enumerate(colors.items(), start=1):
+        curses.init_pair(pair, foreground, background)
+        attributes[key] |= curses.color_pair(pair)
+    return attributes
+
+
+def tui_addstr(
+    screen: curses.window,
+    y: int,
+    x: int,
+    value: str,
+    attribute: int = 0,
+    limit: int | None = None,
+) -> None:
+    height, width = screen.getmaxyx()
+    if y < 0 or y >= height or x < 0 or x >= width:
+        return
+    available = max(0, width - x - 1)
+    if limit is not None:
+        available = min(available, max(0, limit))
+    if not available:
+        return
+    try:
+        screen.addnstr(y, x, value, available, attribute)
+    except curses.error:
+        pass
+
+
+def tui_hline(screen: curses.window, y: int, attribute: int) -> None:
+    _, width = screen.getmaxyx()
+    if width < 2:
+        return
+    try:
+        screen.hline(y, 1, curses.ACS_HLINE, width - 2, attribute)
+    except curses.error:
+        pass
+
+
+def tui_stats(torrents: list[dict]) -> str:
+    total_size = sum(int(item.get("size") or 0) for item in torrents)
+    completed = sum(int(item.get("completed") or 0) for item in torrents)
+    progress = completed / total_size * 100 if total_size else 0
+    active = sum(
+        1
+        for item in torrents
+        if int(item.get("dlspeed") or 0) + int(item.get("upspeed") or 0) > 0
+    )
+    down = sum(int(item.get("dlspeed") or 0) for item in torrents)
+    up = sum(int(item.get("upspeed") or 0) for item in torrents)
+    return (
+        f"TORRENTS {len(torrents)}  //  ACTIVE {active}  //  DONE {progress:5.1f}%"
+        f"  //  DOWN {format_rate(down)}  //  UP {format_rate(up)}"
+    )
+
+
+def draw_tui(
+    screen: curses.window,
+    torrents: list[dict],
+    ids: dict[str, int],
+    scroll: int,
+    interval: float,
+    attributes: dict[str, int],
+    error: str | None,
+) -> tuple[int, int]:
+    screen.erase()
+    height, width = screen.getmaxyx()
+    try:
+        screen.attron(attributes["border"])
+        screen.border()
+        screen.attroff(attributes["border"])
+    except curses.error:
+        pass
+
+    if width < TUI_MIN_WIDTH or height < TUI_MIN_HEIGHT:
+        warning = f"Terminal too small — resize to at least {TUI_MIN_WIDTH}x{TUI_MIN_HEIGHT}"
+        tui_addstr(
+            screen,
+            max(1, height // 2),
+            max(1, (width - len(warning)) // 2),
+            warning,
+            attributes["error"],
+        )
+        screen.refresh()
+        return 0, 1
+
+    inner_x = 2
+    inner_width = width - 4
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    tui_addstr(
+        screen,
+        1,
+        inner_x,
+        "DLM // BEAST DOWNLOAD MANAGER",
+        attributes["title"],
+        inner_width,
+    )
+    tui_addstr(
+        screen,
+        1,
+        max(inner_x, width - len(timestamp) - 2),
+        timestamp,
+        attributes["title"],
+        len(timestamp),
+    )
+    tui_addstr(
+        screen,
+        2,
+        inner_x,
+        tui_stats(torrents),
+        attributes["footer"],
+        inner_width,
+    )
+    tui_hline(screen, 3, attributes["border"])
+
+    rows, id_width, prefix_width = tui_rows(torrents, ids, inner_width)
+    header = (
+        f"{'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
+        f"{'UP':>10} {'ETA':>8} NAME"
+    )
+    tui_addstr(screen, 4, inner_x, header, attributes["header"], inner_width)
+
+    content_top = 5
+    content_bottom = height - 3
+    content_height = max(1, content_bottom - content_top)
+    max_scroll = max(0, len(rows) - content_height)
+    scroll = min(max(0, scroll), max_scroll)
+    visible_rows = rows[scroll : scroll + content_height]
+    for offset, row in enumerate(visible_rows):
+        if row is None:
+            continue
+        y = content_top + offset
+        if bool(row["continuation"]):
+            tui_addstr(
+                screen,
+                y,
+                inner_x + prefix_width,
+                str(row["name"]),
+                attributes["name"],
+                inner_width - prefix_width,
+            )
+            continue
+        x = inner_x
+        for key, value, field_width in (
+            ("id", row["id"], id_width),
+            ("done", row["done"], 7),
+            ("total", row["total"], 10),
+            ("down", row["down"], 10),
+            ("up", row["up"], 10),
+            ("eta", row["eta"], 8),
+        ):
+            tui_addstr(
+                screen,
+                y,
+                x,
+                str(value),
+                attributes[key],
+                field_width,
+            )
+            x += field_width + 1
+        name_attribute = attributes["name"] | (
+            curses.A_BOLD if bool(row["active"]) else 0
+        )
+        tui_addstr(
+            screen,
+            y,
+            x,
+            str(row["name"]),
+            name_attribute,
+            inner_width - prefix_width,
+        )
+
+    tui_hline(screen, height - 3, attributes["border"])
+    if error:
+        status = f"ERROR // {error}  //  [R] RETRY  [Q] QUIT"
+        status_attribute = attributes["error"]
+    else:
+        status = (
+            f"[Q] QUIT  [R] REFRESH  [J/K or arrows] SCROLL  "
+            f"[PGUP/PGDN] PAGE  //  AUTO {interval:g}s"
+        )
+        status_attribute = attributes["footer"]
+    first_visible = scroll + 1 if rows else 0
+    position = (
+        f"{first_visible}-{min(len(rows), scroll + content_height)} / {len(rows)}"
+    )
+    tui_addstr(
+        screen,
+        height - 2,
+        inner_x,
+        status,
+        status_attribute,
+        max(1, inner_width - len(position) - 2),
+    )
+    tui_addstr(
+        screen,
+        height - 2,
+        width - len(position) - 2,
+        position,
+        attributes["footer"],
+        len(position),
+    )
+    screen.refresh()
+    return max_scroll, content_height
+
+
+def run_tui(
+    screen: curses.window,
+    qbit: QBittorrent,
+    ids: TorrentIds,
+    active_only: bool,
+    interval: float,
+) -> None:
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    screen.keypad(True)
+    screen.timeout(100)
+    attributes = tui_attributes()
+    torrents: list[dict] = []
+    id_map: dict[str, int] = {}
+    error: str | None = None
+    scroll = 0
+    next_refresh = 0.0
+
+    while True:
+        now = time.monotonic()
+        if now >= next_refresh:
+            try:
+                torrents, id_map = list_torrents(qbit, ids, active_only)
+                error = None
+            except Exception as refresh_error:
+                error = str(refresh_error)
+            next_refresh = now + interval
+
+        max_scroll, page_size = draw_tui(
+            screen,
+            torrents,
+            id_map,
+            scroll,
+            interval,
+            attributes,
+            error,
+        )
+        scroll = min(scroll, max_scroll)
+        key = screen.getch()
+        if key in {ord("q"), ord("Q")}:
+            return
+        if key in {ord("r"), ord("R")}:
+            next_refresh = 0.0
+        elif key in {curses.KEY_DOWN, ord("j"), ord("J")}:
+            scroll = min(max_scroll, scroll + 1)
+        elif key in {curses.KEY_UP, ord("k"), ord("K")}:
+            scroll = max(0, scroll - 1)
+        elif key in {curses.KEY_NPAGE, ord(" ")}:
+            scroll = min(max_scroll, scroll + page_size)
+        elif key == curses.KEY_PPAGE:
+            scroll = max(0, scroll - page_size)
+        elif key == curses.KEY_HOME:
+            scroll = 0
+        elif key == curses.KEY_END:
+            scroll = max_scroll
+
+
 def command_list(qbit: QBittorrent, ids: TorrentIds, args: argparse.Namespace) -> None:
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if interactive and not args.plain:
+        interval = max(0.5, args.watch if args.watch is not None else 2.0)
+        try:
+            curses.wrapper(run_tui, qbit, ids, args.active, interval)
+        except KeyboardInterrupt:
+            pass
+        return
     if args.watch is None:
         show_list(qbit, ids, args.active)
         return
@@ -438,13 +798,18 @@ def parser() -> argparse.ArgumentParser:
         const=2.0,
         type=float,
         metavar="SECONDS",
-        help="refresh continuously (default: every 2 seconds)",
+        help="set the dashboard refresh interval (default: 2 seconds)",
     )
     list_parser.add_argument(
         "-a",
         "--active",
         action="store_true",
         help="hide queued, paused, and stopped jobs",
+    )
+    list_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="print without opening the full-screen interface",
     )
     commands.add_parser("stop", help="stop all torrents")
     commands.add_parser("start", help="restart the single-download queue")

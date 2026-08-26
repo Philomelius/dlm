@@ -3,7 +3,14 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from dlm import QBittorrent, TorrentIds, command_remove, torrent_table
+from dlm import (
+    QBittorrent,
+    TorrentIds,
+    command_remove,
+    torrent_table,
+    tui_rows,
+    tui_stats,
+)
 
 
 class DlmTests(unittest.TestCase):
@@ -79,6 +86,45 @@ class DlmTests(unittest.TestCase):
         table = torrent_table([], {}, terminal_width=76, use_color=True)
         self.assertIn("\033[1;36m", table)
         self.assertIn("\033[0m", table)
+
+    def test_tui_rows_wrap_long_names_and_add_spacing(self):
+        torrents = [
+            {
+                "hash": "a",
+                "name": "Cape.Fear.S01E10.The.Executioners.2160p." * 3,
+                "progress": 0.25,
+                "size": 1024,
+            },
+            {"hash": "b", "name": "Second", "progress": 0, "size": 0},
+        ]
+        rows, _, prefix_width = tui_rows(torrents, {"a": 20, "b": 21}, 76)
+        continuation_rows = [
+            row for row in rows if row and bool(row["continuation"])
+        ]
+        self.assertTrue(continuation_rows)
+        self.assertTrue(
+            all(
+                len(str(row["name"])) <= 76 - prefix_width
+                for row in continuation_rows
+            )
+        )
+        self.assertIn(None, rows)
+
+    def test_tui_stats_summarize_the_queue(self):
+        stats = tui_stats(
+            [
+                {
+                    "size": 100,
+                    "completed": 50,
+                    "dlspeed": 1024,
+                    "upspeed": 0,
+                }
+            ]
+        )
+        self.assertIn("TORRENTS 1", stats)
+        self.assertIn("ACTIVE 1", stats)
+        self.assertIn("DONE  50.0%", stats)
+        self.assertIn("DOWN 1KiB/s", stats)
 
     def test_remove_explicitly_deletes_downloaded_files(self):
         qbit = QBittorrent.__new__(QBittorrent)
