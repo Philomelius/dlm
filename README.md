@@ -40,6 +40,8 @@ qBittorrent torrents.
   active-download count and global download-speed limit;
 - keyboard-only scrolling; mouse-wheel events are ignored;
 - name search with live filtering;
+- paste and validate a magnet URI directly from the dashboard with `a`, then
+  add it to qBittorrent's managed download queue;
 - an Enter-key action menu for starting, pausing/stopping, or deleting selected
   qBittorrent and Transmission torrents;
 - every torrent stays on one data row with a blank spacer beneath it;
@@ -155,6 +157,13 @@ Mouse-wheel scrolling remains disabled.
 Press `s` to search torrent names. Every space-separated search word must
 appear in the name. Press Enter to apply the search. Esc cancels search entry;
 once a search is active, Esc clears it and restores the full list.
+
+Press `a` to open the `ADD MAGNET TO QUEUE` dialog. Paste a complete
+`magnet:?` URI and press Enter. DLM validates that it contains a BitTorrent v1
+or v2 `xt` identifier, reapplies the managed queue preferences, and submits it
+to qBittorrent. The torrent starts when a download slot is available; otherwise
+it remains queued. Invalid input stays in the dialog for correction, and Esc
+cancels without adding anything.
 
 Press Enter on any selected torrent to open its action menu:
 

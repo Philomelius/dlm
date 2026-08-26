@@ -14,6 +14,7 @@ from dlm import (
     TUI_ACTIONS,
     Transmission,
     TorrentIds,
+    add_magnet_to_queue,
     command_remove,
     ensure_selected_visible,
     execute_tui_action,
@@ -36,6 +37,7 @@ from dlm import (
     tui_rows,
     tui_stats,
     tui_stats_line,
+    validate_magnet_uri,
 )
 
 
@@ -626,6 +628,49 @@ class DlmTests(unittest.TestCase):
             hashes="hash",
             deleteFiles="true",
         )
+
+    def test_magnet_uri_validation_accepts_v1_and_v2_torrents(self):
+        v1 = f"magnet:?xt=urn:btih:{'0' * 40}&dn=Example"
+        v2 = f"magnet:?xt=urn:btmh:1220{'a' * 64}&dn=Example"
+
+        self.assertEqual(validate_magnet_uri(f"  {v1}  "), v1)
+        self.assertEqual(validate_magnet_uri(v2), v2)
+
+    def test_magnet_uri_validation_rejects_invalid_input(self):
+        for value in (
+            "",
+            "https://example.invalid/file.torrent",
+            "magnet:?dn=Missing+Identifier",
+            "magnet:?xt=urn:btih:",
+            "magnet:?xt=urn:btih:0123456789abcdef",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    validate_magnet_uri(value)
+
+    def test_magnet_is_added_under_managed_queue_preferences(self):
+        magnet_uri = f"magnet:?xt=urn:btih:{'0' * 40}&dn=Example"
+        qbit = Mock()
+
+        self.assertEqual(add_magnet_to_queue(qbit, magnet_uri), magnet_uri)
+        qbit.configure_queue.assert_called_once_with()
+        qbit.add_magnet.assert_called_once_with(magnet_uri)
+
+    def test_qbittorrent_add_magnet_uses_web_api(self):
+        magnet_uri = f"magnet:?xt=urn:btih:{'0' * 40}&dn=Example"
+        qbit = QBittorrent.__new__(QBittorrent)
+        qbit.post = Mock(return_value="Ok.")
+
+        qbit.add_magnet(magnet_uri)
+
+        qbit.post.assert_called_once_with(
+            "/api/v2/torrents/add",
+            urls=magnet_uri,
+        )
+
+        qbit.post.return_value = "Fails."
+        with self.assertRaisesRegex(RuntimeError, "rejected"):
+            qbit.add_magnet(magnet_uri)
 
     def test_clickable_limits_use_qbittorrent_preferences_and_transfer_api(self):
         qbit = QBittorrent.__new__(QBittorrent)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import curses
 from datetime import datetime
 import http.cookiejar
@@ -385,6 +386,11 @@ class QBittorrent:
             "/api/v2/transfer/setDownloadLimit",
             limit=str(max(0, bytes_per_second)),
         )
+
+    def add_magnet(self, magnet_uri: str) -> None:
+        result = self.post("/api/v2/torrents/add", urls=magnet_uri)
+        if result.strip() not in {"", "Ok."}:
+            raise RuntimeError("qBittorrent rejected the magnet URI")
 
     def remove_with_files(self, torrent_hash: str) -> None:
         self.post(
@@ -843,6 +849,49 @@ def filter_torrents(torrents: list[dict], query: str) -> list[dict]:
     ]
 
 
+def validate_magnet_uri(value: str) -> str:
+    """Return a normalized magnet URI or raise a useful validation error."""
+    magnet_uri = value.strip()
+    if not magnet_uri:
+        raise ValueError("A magnet URI is required.")
+    parsed = urllib.parse.urlsplit(magnet_uri)
+    if parsed.scheme.casefold() != "magnet" or not magnet_uri.casefold().startswith(
+        "magnet:?"
+    ):
+        raise ValueError("The URL must begin with magnet:?")
+    topics = [
+        topic.strip()
+        for key, topic in urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+        if key.casefold() == "xt"
+    ]
+    def valid_topic(topic: str) -> bool:
+        lowered = topic.casefold()
+        if lowered.startswith("urn:btih:"):
+            identifier = lowered.removeprefix("urn:btih:")
+            return bool(
+                re.fullmatch(r"[0-9a-f]{40}|[a-z2-7]{32}", identifier)
+            )
+        if lowered.startswith("urn:btmh:"):
+            identifier = lowered.removeprefix("urn:btmh:")
+            return bool(re.fullmatch(r"1220[0-9a-f]{64}", identifier))
+        return False
+
+    if not any(valid_topic(topic) for topic in topics):
+        raise ValueError("The magnet URI needs a valid xt torrent identifier.")
+    return magnet_uri
+
+
+def add_magnet_to_queue(qbit: QBittorrent, value: str) -> str:
+    """Validate and add a magnet under DLM's managed queue preferences."""
+    magnet_uri = validate_magnet_uri(value)
+    qbit.configure_queue()
+    qbit.add_magnet(magnet_uri)
+    return magnet_uri
+
+
 def sort_torrents(
     torrents: list[dict],
     sort_key: str | None,
@@ -1280,7 +1329,8 @@ def draw_tui(
         status_attribute = attributes["footer"]
     else:
         status = (
-            f"[ENTER] ACTION  [S] SEARCH  [Q] QUIT  [CLICK HEADER] SORT  "
+            f"[ENTER] ACTION  [A] ADD MAGNET  [S] SEARCH  [Q] QUIT  "
+            f"[CLICK HEADER] SORT  "
             f"[ARROWS] SELECT  "
             f"[PGUP/PGDN] PAGE  [HOME/END] JUMP  //  AUTO {interval:g}s"
         )
@@ -1394,6 +1444,8 @@ def search_prompt(
     title: str = "SEARCH TORRENTS",
     description: str = "All words must appear in the torrent name.",
     replace_on_type: bool = False,
+    submit_label: str = "APPLY",
+    validator: Callable[[str], str] | None = None,
 ) -> str | None:
     height, width = screen.getmaxyx()
     prompt_width = min(
@@ -1410,6 +1462,7 @@ def search_prompt(
     prompt.timeout(-1)
     query = initial_query
     replace_pending = replace_on_type
+    validation_error = ""
     try:
         curses.curs_set(1)
     except curses.error:
@@ -1436,8 +1489,8 @@ def search_prompt(
                 prompt,
                 2,
                 2,
-                description,
-                attributes["name"],
+                validation_error or description,
+                attributes["error"] if validation_error else attributes["name"],
                 prompt_width - 4,
             )
             input_width = max(1, prompt_width - 7)
@@ -1454,7 +1507,7 @@ def search_prompt(
                 prompt,
                 prompt_height - 2,
                 2,
-                "ENTER APPLY  //  ESC CANCEL",
+                f"ENTER {submit_label}  //  ESC CANCEL",
                 attributes["footer"],
                 prompt_width - 4,
             )
@@ -1467,10 +1520,18 @@ def search_prompt(
             if key == 27:
                 return None
             if key in {curses.KEY_ENTER, 10, 13}:
-                return query.strip()
+                value = query.strip()
+                if validator is None:
+                    return value
+                try:
+                    return validator(value)
+                except ValueError as error:
+                    validation_error = f"INVALID // {error}"
+                    continue
             if key in {curses.KEY_BACKSPACE, 8, 127}:
                 query = "" if replace_pending else query[:-1]
                 replace_pending = False
+                validation_error = ""
             elif key == curses.KEY_MOUSE:
                 try:
                     curses.getmouse()
@@ -1481,6 +1542,7 @@ def search_prompt(
                     query = ""
                     replace_pending = False
                 query += chr(key)
+                validation_error = ""
             elif key == curses.KEY_RESIZE:
                 return None
     finally:
@@ -1490,6 +1552,20 @@ def search_prompt(
             pass
         del prompt
         screen.touchwin()
+
+
+def magnet_prompt(
+    screen: curses.window,
+    attributes: dict[str, int],
+) -> str | None:
+    return search_prompt(
+        screen,
+        attributes,
+        title="ADD MAGNET TO QUEUE",
+        description="Paste a complete magnet:? URI for the new torrent.",
+        submit_label="ADD",
+        validator=validate_magnet_uri,
+    )
 
 
 def setting_prompt(
@@ -1822,6 +1898,23 @@ def _run_tui(
                 scroll = 0
                 notice = f'SEARCH "{search_query}" // {len(torrents)} MATCHES'
                 notice_until = time.monotonic() + 3
+            continue
+        if key in {ord("a"), ord("A")}:
+            magnet_uri = magnet_prompt(screen, attributes)
+            next_refresh = max(
+                next_refresh,
+                time.monotonic() + 0.25,
+            )
+            if magnet_uri is None:
+                continue
+            try:
+                add_magnet_to_queue(qbit, magnet_uri)
+                notice = "MAGNET ADDED // MANAGED QUEUE"
+                notice_until = time.monotonic() + 4
+                next_refresh = 0.0
+            except Exception as magnet_error:
+                notice = f"ERROR // {magnet_error}"
+                notice_until = time.monotonic() + 4
             continue
         if key in {ord("r"), ord("R")}:
             next_refresh = 0.0
