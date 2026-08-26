@@ -35,6 +35,15 @@ STATE_PATH = Path(
 )
 UNKNOWN_ETA = 8_640_000
 IDLE_STATES = {"pausedDL", "pausedUP", "queuedDL", "queuedUP", "stoppedDL", "stoppedUP"}
+ANSI_RESET = "\033[0m"
+ANSI_BOLD_CYAN = "\033[1;36m"
+ANSI_DIM = "\033[2m"
+ANSI_BLUE = "\033[94m"
+ANSI_GREEN = "\033[92m"
+ANSI_CYAN = "\033[96m"
+ANSI_MAGENTA = "\033[95m"
+ANSI_YELLOW = "\033[93m"
+ANSI_WHITE = "\033[97m"
 QUEUE_PREFERENCES = {
     "queueing_enabled": True,
     "max_active_downloads": 1,
@@ -47,6 +56,18 @@ QUEUE_PREFERENCES = {
     "max_ratio_act": 0,
     "max_ratio_enabled": True,
 }
+
+
+def terminal_supports_color() -> bool:
+    return (
+        sys.stdout.isatty()
+        and "NO_COLOR" not in os.environ
+        and os.environ.get("TERM", "") != "dumb"
+    )
+
+
+def styled(value: str, ansi: str, enabled: bool) -> str:
+    return f"{ansi}{value}{ANSI_RESET}" if enabled else value
 
 
 def format_bytes(value: int | float) -> str:
@@ -217,8 +238,10 @@ def torrent_table(
     torrents: list[dict],
     ids: dict[str, int],
     terminal_width: int | None = None,
+    use_color: bool | None = None,
 ) -> str:
     width = terminal_width or shutil.get_terminal_size((140, 24)).columns
+    color = terminal_supports_color() if use_color is None else use_color
     id_width = max(2, max((len(str(value)) for value in ids.values()), default=1))
     prefix_width = id_width + 51
     name_width = max(20, width - prefix_width)
@@ -226,27 +249,55 @@ def torrent_table(
         f"{'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
         f"{'UP':>10} {'ETA':>8} NAME"
     )
-    rows = [header, "-" * width]
+    rows = [
+        styled(header, ANSI_BOLD_CYAN, color),
+        styled("-" * width, ANSI_DIM, color),
+    ]
 
-    for torrent in torrents:
+    for index, torrent in enumerate(torrents):
         torrent_id = ids[str(torrent.get("hash") or "").casefold()]
         name = str(torrent.get("name") or "")
         wrapped_name = textwrap.wrap(
             name,
             width=name_width,
-            break_long_words=False,
+            # Dot-separated release names can be wider than the terminal and
+            # otherwise get wrapped by the terminal itself back at column 0.
+            break_long_words=True,
             break_on_hyphens=False,
         ) or [""]
-        row_prefix = (
-            f"{torrent_id:>{id_width}} "
-            f"{float(torrent.get('progress') or 0) * 100:6.2f}% "
-            f"{format_bytes(torrent.get('size') or 0):>10} "
-            f"{format_rate(torrent.get('dlspeed') or 0):>10} "
-            f"{format_rate(torrent.get('upspeed') or 0):>10} "
-            f"{format_eta(torrent.get('eta')):>8} "
+        progress = float(torrent.get("progress") or 0)
+        down_speed = int(torrent.get("dlspeed") or 0)
+        up_speed = int(torrent.get("upspeed") or 0)
+        eta = format_eta(torrent.get("eta"))
+        row_prefix = "".join(
+            (
+                styled(f"{torrent_id:>{id_width}}", ANSI_BLUE, color),
+                " ",
+                styled(f"{progress * 100:6.2f}%", ANSI_GREEN, color),
+                " ",
+                styled(
+                    f"{format_bytes(torrent.get('size') or 0):>10}",
+                    ANSI_CYAN,
+                    color,
+                ),
+                " ",
+                styled(f"{format_rate(down_speed):>10}", ANSI_GREEN, color),
+                " ",
+                styled(f"{format_rate(up_speed):>10}", ANSI_MAGENTA, color),
+                " ",
+                styled(f"{eta:>8}", ANSI_YELLOW, color),
+                " ",
+            )
         )
-        rows.append(f"{row_prefix}{wrapped_name[0]}")
-        rows.extend(f"{'':{prefix_width}}{line}" for line in wrapped_name[1:])
+        rows.append(
+            f"{row_prefix}{styled(wrapped_name[0], ANSI_WHITE, color)}"
+        )
+        rows.extend(
+            f"{'':{prefix_width}}{styled(line, ANSI_WHITE, color)}"
+            for line in wrapped_name[1:]
+        )
+        if index < len(torrents) - 1:
+            rows.append("")
 
     total_size = sum(int(item.get("size") or 0) for item in torrents)
     total_completed = sum(int(item.get("completed") or 0) for item in torrents)
@@ -255,7 +306,7 @@ def torrent_table(
     total_progress = total_completed / total_size * 100 if total_size else 0
     rows.extend(
         [
-            "-" * width,
+            styled("-" * width, ANSI_DIM, color),
             f"{'':>{id_width}} {total_progress:6.2f}% "
             f"{format_bytes(total_size):>10} "
             f"{format_rate(total_down):>10} "
@@ -287,7 +338,13 @@ def show_list(qbit: QBittorrent, ids: TorrentIds, active_only: bool) -> None:
             id_map[str(torrent.get("hash") or "").casefold()],
         )
     )
-    print(f"DLM — {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}")
+    print(
+        styled(
+            f"DLM — {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}",
+            ANSI_BOLD_CYAN,
+            terminal_supports_color(),
+        )
+    )
     print(torrent_table(torrents, id_map))
 
 

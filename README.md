@@ -17,7 +17,9 @@ queue controls.
 ## Features
 
 - concise `DONE`, `TOTAL`, `DOWN`, `UP`, `ETA`, and `NAME` display;
-- names use the remaining terminal width and wrap instead of being truncated;
+- color-coded columns and spacing between torrent entries;
+- names use the remaining terminal width and wrap back into the `NAME` column,
+  including long dot-separated release names;
 - persistent numeric IDs, so commands never require torrent hashes;
 - live watch mode;
 - stop every torrent and restart the queue from the terminal;
@@ -74,6 +76,9 @@ For another machine, configure the first two variables in your shell profile:
 export DLM_QBITTORRENT_URL="http://127.0.0.1:8080"
 export DLM_CREDENTIALS_FILE="$HOME/.config/dlm/qbittorrent.credentials"
 ```
+
+Colors are enabled automatically on interactive terminals. Set `NO_COLOR=1`
+to disable them.
 
 ## Commands
 

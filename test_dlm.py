@@ -41,6 +41,45 @@ class DlmTests(unittest.TestCase):
         for word in name.split():
             self.assertIn(word, table)
 
+    def test_long_unbroken_name_wraps_inside_name_column(self):
+        name = "Cape.Fear.S01E10.The.Executioners.2160p." * 3
+        table = torrent_table(
+            [
+                {
+                    "hash": "abc",
+                    "name": name,
+                    "progress": 0,
+                    "size": 0,
+                }
+            ],
+            {"abc": 20},
+            terminal_width=76,
+            use_color=False,
+        )
+        lines = table.splitlines()
+        name_lines = lines[2:-2]
+        self.assertGreater(len(name_lines), 1)
+        self.assertTrue(all(len(line) <= 76 for line in name_lines))
+        self.assertTrue(all(line.startswith(" " * 53) for line in name_lines[1:]))
+
+    def test_torrents_have_a_blank_line_between_them(self):
+        torrents = [
+            {"hash": "a", "name": "First", "progress": 0, "size": 0},
+            {"hash": "b", "name": "Second", "progress": 0, "size": 0},
+        ]
+        table = torrent_table(
+            torrents,
+            {"a": 1, "b": 2},
+            terminal_width=100,
+            use_color=False,
+        )
+        self.assertIn("First\n\n", table)
+
+    def test_colors_can_be_enabled(self):
+        table = torrent_table([], {}, terminal_width=76, use_color=True)
+        self.assertIn("\033[1;36m", table)
+        self.assertIn("\033[0m", table)
+
     def test_remove_explicitly_deletes_downloaded_files(self):
         qbit = QBittorrent.__new__(QBittorrent)
         qbit.post = Mock()
