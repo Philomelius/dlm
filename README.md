@@ -35,7 +35,7 @@ qBittorrent torrents.
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
 - high-contrast torrent numbers and a yellow `>` selection marker;
-- clickable `DONE`, `DOWN`, `UP`, `ETA`, and `NAME` sorting headers;
+- clickable `#`, `DONE`, `DOWN`, `UP`, `ETA`, and `NAME` sorting headers;
 - clickable `ACTIVE` and top-line `DOWN` controls for changing qBittorrent's
   active-download count and global download-speed limit;
 - keyboard-only scrolling; mouse-wheel events are ignored;
@@ -131,7 +131,8 @@ name ends with an ellipsis. Use the arrow keys or `j`/`k` to select another
 torrent. Held arrow keys are clamped safely at the first and last torrent.
 Mouse-wheel events are ignored, so scrolling is keyboard-only.
 
-Click `DONE`, `DOWN`, `UP`, `ETA`, or `NAME` to reorder the visible torrents.
+Click `#`, `DONE`, `DOWN`, `UP`, `ETA`, or `NAME` to reorder the visible
+torrents. `#` sorts by DLM's persistent torrent number across both clients.
 The first click sorts high-to-low (`Z` to `A` for names); another click on the
 same heading reverses the order. A `▼` or `▲` beside the active heading shows
 the current direction. Unknown ETAs always remain below known ETAs.

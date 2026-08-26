@@ -847,6 +847,7 @@ def sort_torrents(
     torrents: list[dict],
     sort_key: str | None,
     descending: bool,
+    ids: dict[str, int] | None = None,
 ) -> list[dict]:
     """Sort a filtered list while keeping unknown ETAs at the bottom."""
     if sort_key is None:
@@ -855,6 +856,18 @@ def sort_torrents(
         return sorted(
             torrents,
             key=lambda item: one_line_name(item.get("name")).casefold(),
+            reverse=descending,
+        )
+    if sort_key == "number":
+        torrent_ids = ids or {}
+        return sorted(
+            torrents,
+            key=lambda item: int(
+                torrent_ids.get(
+                    str(item.get("hash") or "").casefold(),
+                    0,
+                )
+            ),
             reverse=descending,
         )
     if sort_key == "eta":
@@ -904,8 +917,11 @@ def next_sort_order(
 
 
 def header_sort_key(mouse_x: int, inner_x: int, id_width: int) -> str | None:
-    """Map a header click to a sortable column; TOTAL and # are inert."""
-    x = inner_x + 2 + id_width + 1
+    """Map a header click to a sortable column; only TOTAL is inert."""
+    number_x = inner_x + 2
+    if number_x <= mouse_x < number_x + id_width:
+        return "number"
+    x = number_x + id_width + 1
     for key, field_width in (
         ("done", 7),
         (None, 10),
@@ -934,7 +950,10 @@ def sort_header_label(
     descending: bool,
 ) -> str:
     indicator = "▼" if descending else "▲"
-    value = f"{label} {indicator}" if key == active_key else label
+    if key == active_key:
+        value = f"{label}{indicator}" if label == "#" else f"{label} {indicator}"
+    else:
+        value = label
     return f"{value:>{width}}" if width is not None else value
 
 
@@ -1170,7 +1189,7 @@ def draw_tui(
 
     rows, id_width, prefix_width = tui_rows(torrents, ids, inner_width)
     header = (
-        f"  {'#':>{id_width}} "
+        f"  {sort_header_label('#', 'number', id_width, sort_key, sort_descending)} "
         f"{sort_header_label('DONE', 'done', 7, sort_key, sort_descending)} "
         f"{'TOTAL':>10} "
         f"{sort_header_label('DOWN', 'down', 10, sort_key, sort_descending)} "
@@ -1614,6 +1633,7 @@ def _run_tui(
                     filter_torrents(all_torrents, search_query),
                     sort_key,
                     sort_descending,
+                    id_map,
                 )
                 if selected_hash:
                     selected_index = next(
@@ -1760,6 +1780,7 @@ def _run_tui(
                 filter_torrents(all_torrents, search_query),
                 sort_key,
                 sort_descending,
+                id_map,
             )
             selected_index = 0
             selected_since = click_time
@@ -1774,6 +1795,7 @@ def _run_tui(
                 filter_torrents(all_torrents, search_query),
                 sort_key,
                 sort_descending,
+                id_map,
             )
             selected_index = 0
             selected_since = time.monotonic()
@@ -1793,6 +1815,7 @@ def _run_tui(
                     filter_torrents(all_torrents, search_query),
                     sort_key,
                     sort_descending,
+                    id_map,
                 )
                 selected_index = 0
                 selected_since = time.monotonic()

@@ -392,6 +392,7 @@ class DlmTests(unittest.TestCase):
         )
 
     def test_sortable_headers_map_to_exact_click_regions(self):
+        self.assertEqual(header_sort_key(4, 2, 2), "number")
         self.assertEqual(header_sort_key(7, 2, 2), "done")
         self.assertIsNone(header_sort_key(15, 2, 2))
         self.assertEqual(header_sort_key(26, 2, 2), "down")
@@ -402,6 +403,7 @@ class DlmTests(unittest.TestCase):
     def test_torrents_sort_in_both_directions_for_every_header(self):
         torrents = [
             {
+                "hash": "a",
                 "name": "Alpha",
                 "progress": 0.2,
                 "dlspeed": 30,
@@ -409,6 +411,7 @@ class DlmTests(unittest.TestCase):
                 "eta": 30,
             },
             {
+                "hash": "c",
                 "name": "Charlie",
                 "progress": 0.9,
                 "dlspeed": 10,
@@ -416,6 +419,7 @@ class DlmTests(unittest.TestCase):
                 "eta": -1,
             },
             {
+                "hash": "b",
                 "name": "Bravo",
                 "progress": 0.5,
                 "dlspeed": 20,
@@ -423,7 +427,16 @@ class DlmTests(unittest.TestCase):
                 "eta": 10,
             },
         ]
+        ids = {"a": 12, "b": 42, "c": 3}
 
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "number", True, ids)],
+            ["Bravo", "Alpha", "Charlie"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "number", False, ids)],
+            ["Charlie", "Alpha", "Bravo"],
+        )
         self.assertEqual(
             [item["name"] for item in sort_torrents(torrents, "name", True)],
             ["Charlie", "Bravo", "Alpha"],
@@ -450,6 +463,10 @@ class DlmTests(unittest.TestCase):
         )
 
     def test_active_sort_header_shows_its_direction(self):
+        self.assertEqual(
+            sort_header_label("#", "number", 2, "number", True),
+            "#▼",
+        )
         self.assertEqual(
             sort_header_label("DONE", "done", 7, "done", True),
             " DONE ▼",
