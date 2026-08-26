@@ -38,6 +38,7 @@ from dlm import (
     tui_stats,
     tui_stats_line,
     validate_magnet_uri,
+    visible_torrent_name,
 )
 
 
@@ -153,7 +154,7 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(rows[0]["name"], torrents[0]["name"])
         self.assertEqual(prefix_width, 55)
 
-    def test_names_are_truncated_and_selected_names_marquee_to_the_right(self):
+    def test_names_are_truncated_and_opt_in_marquee_moves_to_the_right(self):
         name = "ABCDEFGHIJ"
         self.assertEqual(truncate_name(name, 5), "ABCD…")
         self.assertEqual(truncate_name("short", 5), "short")
@@ -165,6 +166,18 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(
             marquee_name(name, 4, 7.1, step_time=1.0),
             "GHIJ",
+        )
+        self.assertEqual(
+            visible_torrent_name(name, 4, True, False, 10),
+            "ABC…",
+        )
+        self.assertEqual(
+            visible_torrent_name(name, 4, True, True, 0.25),
+            "CDEF",
+        )
+        self.assertEqual(
+            visible_torrent_name(name, 4, False, True, 0.25),
+            "ABC…",
         )
 
     def test_selected_torrent_is_scrolled_into_view(self):

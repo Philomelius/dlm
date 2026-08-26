@@ -45,8 +45,8 @@ qBittorrent torrents.
 - an Enter-key action menu for starting, pausing/stopping, or deleting selected
   qBittorrent and Transmission torrents;
 - every torrent stays on one data row with a blank spacer beneath it;
-- inactive long names are truncated with an ellipsis, while the selected name
-  automatically scrolls toward the right until the complete name is revealed;
+- long names are truncated with an ellipsis; Right Arrow toggles scrolling for
+  the selected torrent name only;
 - persistent numeric IDs, so commands never require torrent hashes;
 - automatic refresh plus keyboard navigation and refresh controls;
 - low-latency menus and Escape cancellation with input prioritized over refresh;
@@ -127,11 +127,13 @@ both source totals. Transmission is optional: if its daemon is unavailable,
 the qBittorrent dashboard continues to work.
 
 The first torrent is selected automatically with a yellow `>` marker and
-high-contrast number/name instead of a reverse-video white bar. If its name is
-too long, the name scrolls horizontally after a short pause; every other long
-name ends with an ellipsis. Use the arrow keys or `j`/`k` to select another
-torrent. Held arrow keys are clamped safely at the first and last torrent.
-Mouse-wheel events are ignored, so scrolling is keyboard-only.
+high-contrast number/name instead of a reverse-video white bar. Long names are
+initially truncated with an ellipsis. Press Right Arrow to start scrolling the
+selected name, then press Right Arrow again to stop and return to its beginning.
+Selecting another torrent stops name scrolling automatically. Use Up/Down or
+`j`/`k` to select another torrent. Held arrow keys are clamped safely at the
+first and last torrent. Mouse-wheel events are ignored, so scrolling is
+keyboard-only.
 
 Click `#`, `DONE`, `DOWN`, `UP`, `ETA`, or `NAME` to reorder the visible
 torrents. `#` sorts by DLM's persistent torrent number across both clients.
@@ -150,6 +152,7 @@ Mouse-wheel scrolling remains disabled.
 - Home or `g` selects the first torrent;
 - End or `G` selects the final torrent;
 - Ctrl+Up jumps to the first torrent and Ctrl+Down jumps to the final torrent;
+- Right Arrow toggles scrolling for the selected torrent's name;
 - two quick Up presses move one page up, while two quick Down presses move one
   page down; a single arrow press still moves immediately by one torrent;
 - `r` refreshes immediately.

@@ -219,6 +219,24 @@ def marquee_name(
     return name[offset : offset + width]
 
 
+def visible_torrent_name(
+    name: str,
+    width: int,
+    selected: bool,
+    marquee_active: bool,
+    marquee_elapsed: float,
+) -> str:
+    """Render a static truncation unless the selected name marquee is enabled."""
+    if selected and marquee_active:
+        return marquee_name(
+            name,
+            width,
+            marquee_elapsed,
+            start_pause=0.0,
+        )
+    return truncate_name(name, width)
+
+
 class TorrentIds:
     """Persistent integer IDs so users never need to handle torrent hashes."""
 
@@ -1181,7 +1199,8 @@ def draw_tui(
     notice: str | None,
     search_query: str,
     total_torrents: int,
-    selected_elapsed: float,
+    marquee_active: bool,
+    marquee_elapsed: float,
     sort_key: str | None,
     sort_descending: bool,
 ) -> tuple[int, int, list[dict | None]]:
@@ -1301,10 +1320,12 @@ def draw_tui(
         x += 3
         name_width = max(0, inner_width - prefix_width - 3)
         full_name = str(row["name"])
-        visible_name = (
-            marquee_name(full_name, name_width, selected_elapsed)
-            if selected
-            else truncate_name(full_name, name_width)
+        visible_name = visible_torrent_name(
+            full_name,
+            name_width,
+            selected,
+            marquee_active,
+            marquee_elapsed,
         )
         name_attribute = (
             attributes["selected"] if selected else attributes["name"]
@@ -1331,7 +1352,7 @@ def draw_tui(
         status = (
             f"[ENTER] ACTION  [A] ADD MAGNET  [S] SEARCH  [Q] QUIT  "
             f"[CLICK HEADER] SORT  "
-            f"[ARROWS] SELECT  "
+            f"[UP/DOWN] SELECT  [RIGHT] NAME SCROLL  "
             f"[PGUP/PGDN] PAGE  [HOME/END] JUMP  //  AUTO {interval:g}s"
         )
         if search_query:
@@ -1681,7 +1702,8 @@ def _run_tui(
     notice: str | None = None
     notice_until = 0.0
     next_refresh = 0.0
-    selected_since = time.monotonic()
+    marquee_active = False
+    marquee_started_at = time.monotonic()
     sort_key: str | None = None
     sort_descending = True
     last_header_click_key: str | None = None
@@ -1728,7 +1750,8 @@ def _run_tui(
                     else ""
                 )
                 if current_hash != selected_hash:
-                    selected_since = now
+                    marquee_active = False
+                    marquee_started_at = now
                 error = None
             except Exception as refresh_error:
                 error = str(refresh_error)
@@ -1747,7 +1770,8 @@ def _run_tui(
             active_notice,
             search_query,
             len(all_torrents),
-            max(0.0, time.monotonic() - selected_since),
+            marquee_active,
+            max(0.0, time.monotonic() - marquee_started_at),
             sort_key,
             sort_descending,
         )
@@ -1760,6 +1784,13 @@ def _run_tui(
             arrow_taps.reset()
         if key in {ord("q"), ord("Q")}:
             return
+        if key == curses.KEY_RIGHT and torrents:
+            toggle_time = time.monotonic()
+            marquee_active = not marquee_active
+            marquee_started_at = toggle_time
+            notice = f"NAME SCROLL // {'ON' if marquee_active else 'OFF'}"
+            notice_until = toggle_time + 2
+            continue
         if key == curses.KEY_MOUSE:
             try:
                 _, mouse_x, mouse_y, _, button_state = curses.getmouse()
@@ -1859,7 +1890,8 @@ def _run_tui(
                 id_map,
             )
             selected_index = 0
-            selected_since = click_time
+            marquee_active = False
+            marquee_started_at = click_time
             scroll = 0
             direction = "HIGH TO LOW" if sort_descending else "LOW TO HIGH"
             notice = f"SORT {sort_key.upper()} // {direction}"
@@ -1874,7 +1906,8 @@ def _run_tui(
                 id_map,
             )
             selected_index = 0
-            selected_since = time.monotonic()
+            marquee_active = False
+            marquee_started_at = time.monotonic()
             scroll = 0
             notice = "SEARCH CLEARED"
             notice_until = time.monotonic() + 2
@@ -1894,7 +1927,8 @@ def _run_tui(
                     id_map,
                 )
                 selected_index = 0
-                selected_since = time.monotonic()
+                marquee_active = False
+                marquee_started_at = time.monotonic()
                 scroll = 0
                 notice = f'SEARCH "{search_query}" // {len(torrents)} MATCHES'
                 notice_until = time.monotonic() + 3
@@ -1929,7 +1963,8 @@ def _run_tui(
         )
         if new_selection != selected_index:
             selected_index = new_selection
-            selected_since = time.monotonic()
+            marquee_active = False
+            marquee_started_at = time.monotonic()
             scroll = ensure_selected_visible(
                 rows, selected_index, scroll, page_size
             )
