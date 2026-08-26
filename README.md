@@ -20,12 +20,14 @@ one-download-at-a-time queue controls.
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
 - highlighted torrent selection with arrow-key navigation;
+- keyboard-only scrolling; mouse-wheel events are ignored;
+- name search with live filtering;
 - an Enter-key action menu for starting, pausing/stopping, or deleting the
   selected torrent;
 - names use the remaining terminal width and wrap back into the `NAME` column,
   including long dot-separated release names;
 - persistent numeric IDs, so commands never require torrent hashes;
-- automatic refresh plus keyboard scrolling and refresh controls;
+- automatic refresh plus keyboard navigation and refresh controls;
 - stop every torrent and restart the queue from the terminal;
 - delete a qBittorrent job together with all of its downloaded files;
 - Python standard library only—no runtime packages.
@@ -94,8 +96,17 @@ dlm list
 ```
 
 The first torrent is highlighted automatically. Use the arrow keys or `j`/`k`
-to select another torrent, Page Up/Page Down to move faster, and `r` to refresh
-immediately. The selected torrent remains visible as the list scrolls.
+to select another torrent. Held arrow keys are clamped safely at the first and
+last torrent. Mouse-wheel events are ignored, so scrolling is keyboard-only.
+
+- Page Up/Page Down move by one visible page;
+- Home or `g` selects the first torrent;
+- End or `G` selects the final torrent;
+- `r` refreshes immediately.
+
+Press `s` to search torrent names. Every space-separated search word must
+appear in the name. Press Enter to apply the search. Esc cancels search entry;
+once a search is active, Esc clears it and restores the full list.
 
 Press Enter on the selected torrent to open its action menu:
 
@@ -105,9 +116,10 @@ Press Enter on the selected torrent to open its action menu:
 - `DELETE + DATA` removes the torrent and its downloaded files after a second
   confirmation dialog.
 
-Use the arrow keys and Enter inside a menu. Press Esc to cancel a menu and `q`
-to close DLM. qBittorrent 5.2 has one stop operation rather than separate pause
-and stop operations, so DLM labels that action `PAUSE / STOP`.
+Use the arrow keys and Enter inside a menu. Esc is the consistent cancel/clear
+key for search, action menus, and delete confirmation. Press `q` to close DLM.
+qBittorrent 5.2 has one stop operation rather than separate pause and stop
+operations, so DLM labels that action `PAUSE / STOP`.
 
 Choose another refresh interval:
 

@@ -1,3 +1,4 @@
+import curses
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,8 @@ from dlm import (
     command_remove,
     ensure_selected_visible,
     execute_tui_action,
+    filter_torrents,
+    navigation_selection,
     parse_arguments,
     torrent_table,
     tui_rows,
@@ -185,6 +188,73 @@ class DlmTests(unittest.TestCase):
         self.assertIn("ACTIVE 1", stats)
         self.assertIn("DONE  50.0%", stats)
         self.assertIn("DOWN 1KiB/s", stats)
+
+    def test_search_requires_every_term_in_the_torrent_name(self):
+        torrents = [
+            {"name": "Cape Fear S01E01 2160p"},
+            {"name": "Cape Fear S01E02 1080p"},
+            {"name": "Slow Horses S01E01 2160p"},
+        ]
+        matches = filter_torrents(torrents, "fear 2160P")
+        self.assertEqual(matches, [torrents[0]])
+        self.assertEqual(filter_torrents(torrents, ""), torrents)
+
+    def test_held_arrow_keys_remain_clamped_without_invalid_selection(self):
+        torrents = [
+            {"hash": str(index), "name": f"Torrent {index}", "size": 0}
+            for index in range(10)
+        ]
+        rows, _, _ = tui_rows(
+            torrents,
+            {str(index): index + 1 for index in range(10)},
+            100,
+        )
+        selected = 0
+        for _ in range(1_000):
+            selected = navigation_selection(
+                curses.KEY_DOWN, rows, selected, 5, len(torrents)
+            )
+        self.assertEqual(selected, 9)
+        for _ in range(1_000):
+            selected = navigation_selection(
+                curses.KEY_UP, rows, selected, 5, len(torrents)
+            )
+        self.assertEqual(selected, 0)
+
+    def test_page_home_top_and_end_navigation(self):
+        torrents = [
+            {"hash": str(index), "name": f"Torrent {index}", "size": 0}
+            for index in range(10)
+        ]
+        rows, _, _ = tui_rows(
+            torrents,
+            {str(index): index + 1 for index in range(10)},
+            100,
+        )
+        page_down = navigation_selection(
+            curses.KEY_NPAGE, rows, 0, 5, len(torrents)
+        )
+        self.assertGreater(page_down, 0)
+        self.assertEqual(
+            navigation_selection(
+                curses.KEY_PPAGE, rows, page_down, 5, len(torrents)
+            ),
+            0,
+        )
+        self.assertEqual(
+            navigation_selection(curses.KEY_END, rows, 0, 5, len(torrents)),
+            9,
+        )
+        self.assertEqual(
+            navigation_selection(curses.KEY_HOME, rows, 9, 5, len(torrents)),
+            0,
+        )
+        self.assertEqual(navigation_selection(ord("g"), rows, 9, 5, 10), 0)
+        self.assertEqual(navigation_selection(ord("G"), rows, 0, 5, 10), 9)
+        self.assertEqual(
+            navigation_selection(curses.KEY_MOUSE, rows, 4, 5, 10),
+            4,
+        )
 
     def test_remove_explicitly_deletes_downloaded_files(self):
         qbit = QBittorrent.__new__(QBittorrent)

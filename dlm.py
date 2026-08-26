@@ -497,6 +497,20 @@ def tui_stats(torrents: list[dict]) -> str:
     )
 
 
+def filter_torrents(torrents: list[dict], query: str) -> list[dict]:
+    terms = query.casefold().split()
+    if not terms:
+        return list(torrents)
+    return [
+        torrent
+        for torrent in torrents
+        if all(
+            term in str(torrent.get("name") or "").casefold()
+            for term in terms
+        )
+    ]
+
+
 def selected_row_span(
     rows: list[dict | None], selected_index: int
 ) -> tuple[int, int] | None:
@@ -525,6 +539,56 @@ def ensure_selected_visible(
     return scroll
 
 
+def page_selection(
+    rows: list[dict | None],
+    selected_index: int,
+    page_size: int,
+    direction: int,
+    torrent_count: int,
+) -> int:
+    if not rows or torrent_count < 1:
+        return 0
+    span = selected_row_span(rows, selected_index)
+    if span is None:
+        return min(max(0, selected_index), torrent_count - 1)
+    first, last = span
+    anchor = first if direction < 0 else last
+    target = min(len(rows) - 1, max(0, anchor + direction * page_size))
+    positions = (
+        range(target, len(rows)) if direction > 0 else range(target, -1, -1)
+    )
+    for position in positions:
+        row = rows[position]
+        if row is not None:
+            candidate = int(row["torrent_index"])
+            if candidate != selected_index:
+                return candidate
+    return torrent_count - 1 if direction > 0 else 0
+
+
+def navigation_selection(
+    key: int,
+    rows: list[dict | None],
+    selected_index: int,
+    page_size: int,
+    torrent_count: int,
+) -> int:
+    last = max(0, torrent_count - 1)
+    if key in {curses.KEY_DOWN, ord("j"), ord("J")}:
+        return min(last, selected_index + 1)
+    if key in {curses.KEY_UP, ord("k"), ord("K")}:
+        return max(0, selected_index - 1)
+    if key in {curses.KEY_NPAGE, ord(" ")}:
+        return page_selection(rows, selected_index, page_size, 1, torrent_count)
+    if key == curses.KEY_PPAGE:
+        return page_selection(rows, selected_index, page_size, -1, torrent_count)
+    if key in {curses.KEY_HOME, ord("g")}:
+        return 0
+    if key in {curses.KEY_END, ord("G")}:
+        return last
+    return selected_index
+
+
 def draw_tui(
     screen: curses.window,
     torrents: list[dict],
@@ -535,6 +599,8 @@ def draw_tui(
     attributes: dict[str, int],
     error: str | None,
     notice: str | None,
+    search_query: str,
+    total_torrents: int,
 ) -> tuple[int, int, list[dict | None]]:
     screen.erase()
     height, width = screen.getmaxyx()
@@ -576,11 +642,17 @@ def draw_tui(
         attributes["title"],
         len(timestamp),
     )
+    stats = tui_stats(torrents)
+    if search_query:
+        stats = (
+            f'SEARCH "{search_query}"  //  MATCHES {len(torrents)}/{total_torrents}'
+            f"  //  {stats}"
+        )
     tui_addstr(
         screen,
         2,
         inner_x,
-        tui_stats(torrents),
+        stats,
         attributes["footer"],
         inner_width,
     )
@@ -663,13 +735,14 @@ def draw_tui(
         status_attribute = attributes["footer"]
     else:
         status = (
-            f"[ENTER] ACTIONS  [Q] QUIT  [R] REFRESH  "
-            f"[J/K or arrows] SELECT  //  AUTO {interval:g}s"
+            f"[ENTER] ACTION  [S] SEARCH  [Q] QUIT  [ARROWS] SELECT  "
+            f"[PGUP/PGDN] PAGE  [HOME/END] JUMP  //  AUTO {interval:g}s"
         )
+        if search_query:
+            status = f"[ESC] CLEAR SEARCH  //  {status}"
         status_attribute = attributes["footer"]
-    first_visible = scroll + 1 if rows else 0
     position = (
-        f"{first_visible}-{min(len(rows), scroll + content_height)} / {len(rows)}"
+        f"{selected_index + 1}/{len(torrents)}" if torrents else "0/0"
     )
     tui_addstr(
         screen,
@@ -765,6 +838,100 @@ def modal_menu(
             return None
 
 
+def search_prompt(
+    screen: curses.window,
+    attributes: dict[str, int],
+    initial_query: str = "",
+) -> str | None:
+    height, width = screen.getmaxyx()
+    prompt_width = min(width - 4, max(50, len(initial_query) + 10))
+    prompt_height = 7
+    if prompt_width < 20 or prompt_height > height - 2:
+        return None
+    top = max(1, (height - prompt_height) // 2)
+    left = max(1, (width - prompt_width) // 2)
+    prompt = curses.newwin(prompt_height, prompt_width, top, left)
+    prompt.keypad(True)
+    prompt.timeout(-1)
+    query = initial_query
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+
+    try:
+        while True:
+            prompt.erase()
+            try:
+                prompt.attron(attributes["border"])
+                prompt.border()
+                prompt.attroff(attributes["border"])
+            except curses.error:
+                pass
+            tui_addstr(
+                prompt,
+                1,
+                2,
+                "SEARCH TORRENTS",
+                attributes["title"],
+                prompt_width - 4,
+            )
+            tui_addstr(
+                prompt,
+                2,
+                2,
+                "All words must appear in the torrent name.",
+                attributes["name"],
+                prompt_width - 4,
+            )
+            input_width = max(1, prompt_width - 7)
+            visible_query = query[-input_width:]
+            tui_addstr(
+                prompt,
+                4,
+                2,
+                f"> {visible_query}",
+                attributes["name"] | curses.A_REVERSE,
+                prompt_width - 4,
+            )
+            tui_addstr(
+                prompt,
+                prompt_height - 2,
+                2,
+                "ENTER APPLY  //  ESC CANCEL",
+                attributes["footer"],
+                prompt_width - 4,
+            )
+            try:
+                prompt.move(4, min(prompt_width - 3, 4 + len(visible_query)))
+            except curses.error:
+                pass
+            prompt.refresh()
+            key = prompt.getch()
+            if key == 27:
+                return None
+            if key in {curses.KEY_ENTER, 10, 13}:
+                return query.strip()
+            if key in {curses.KEY_BACKSPACE, 8, 127}:
+                query = query[:-1]
+            elif key == curses.KEY_MOUSE:
+                try:
+                    curses.getmouse()
+                except curses.error:
+                    pass
+            elif 32 <= key <= 126:
+                query += chr(key)
+            elif key == curses.KEY_RESIZE:
+                return None
+    finally:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        del prompt
+        screen.touchwin()
+
+
 def choose_torrent_action(
     screen: curses.window,
     torrent: dict,
@@ -786,8 +953,7 @@ def choose_torrent_action(
         "PERMANENT DELETE",
         f"#{torrent_id} {name}",
         (
-            ("CANCEL — KEEP TORRENT", "cancel"),
-            ("DELETE TORRENT + DOWNLOADED DATA", "delete"),
+            ("CONFIRM DELETE TORRENT + DOWNLOADED DATA", "delete"),
         ),
         attributes,
     )
@@ -811,7 +977,7 @@ def execute_tui_action(qbit: QBittorrent, torrent: dict, action: str) -> str:
     raise RuntimeError(f"Unknown torrent action: {action}")
 
 
-def run_tui(
+def _run_tui(
     screen: curses.window,
     qbit: QBittorrent,
     ids: TorrentIds,
@@ -823,10 +989,12 @@ def run_tui(
     except curses.error:
         pass
     screen.keypad(True)
-    screen.timeout(100)
+    screen.timeout(50)
     attributes = tui_attributes()
+    all_torrents: list[dict] = []
     torrents: list[dict] = []
     id_map: dict[str, int] = {}
+    search_query = ""
     error: str | None = None
     scroll = 0
     selected_index = 0
@@ -843,7 +1011,8 @@ def run_tui(
                     if torrents and selected_index < len(torrents)
                     else ""
                 )
-                torrents, id_map = list_torrents(qbit, ids, active_only)
+                all_torrents, id_map = list_torrents(qbit, ids, active_only)
+                torrents = filter_torrents(all_torrents, search_query)
                 if selected_hash:
                     selected_index = next(
                         (
@@ -871,6 +1040,8 @@ def run_tui(
             attributes,
             error,
             active_notice,
+            search_query,
+            len(all_torrents),
         )
         scroll = min(
             max_scroll,
@@ -879,30 +1050,49 @@ def run_tui(
         key = screen.getch()
         if key in {ord("q"), ord("Q")}:
             return
+        if key == curses.KEY_MOUSE:
+            try:
+                curses.getmouse()
+            except curses.error:
+                pass
+            continue
+        if key == 27 and search_query:
+            search_query = ""
+            torrents = filter_torrents(all_torrents, search_query)
+            selected_index = 0
+            scroll = 0
+            notice = "SEARCH CLEARED"
+            notice_until = time.monotonic() + 2
+            continue
+        if key in {ord("s"), ord("S")}:
+            new_query = search_prompt(screen, attributes, search_query)
+            if new_query:
+                search_query = new_query
+                torrents = filter_torrents(all_torrents, search_query)
+                selected_index = 0
+                scroll = 0
+                notice = f'SEARCH "{search_query}" // {len(torrents)} MATCHES'
+                notice_until = time.monotonic() + 3
+            continue
         if key in {ord("r"), ord("R")}:
             next_refresh = 0.0
-        elif key in {curses.KEY_DOWN, ord("j"), ord("J")}:
-            selected_index = min(max(0, len(torrents) - 1), selected_index + 1)
-            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
-        elif key in {curses.KEY_UP, ord("k"), ord("K")}:
-            selected_index = max(0, selected_index - 1)
-            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
-        elif key in {curses.KEY_NPAGE, ord(" ")}:
-            selected_index = min(
-                max(0, len(torrents) - 1),
-                selected_index + max(1, page_size // 2),
+            continue
+
+        new_selection = navigation_selection(
+            key,
+            rows,
+            selected_index,
+            page_size,
+            len(torrents),
+        )
+        if new_selection != selected_index:
+            selected_index = new_selection
+            scroll = ensure_selected_visible(
+                rows, selected_index, scroll, page_size
             )
-            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
-        elif key == curses.KEY_PPAGE:
-            selected_index = max(0, selected_index - max(1, page_size // 2))
-            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
-        elif key == curses.KEY_HOME:
-            selected_index = 0
-            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
-        elif key == curses.KEY_END:
-            selected_index = max(0, len(torrents) - 1)
-            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
-        elif key in {curses.KEY_ENTER, 10, 13} and torrents:
+            continue
+
+        if key in {curses.KEY_ENTER, 10, 13} and torrents:
             selected = torrents[selected_index]
             torrent_id = id_map[str(selected.get("hash") or "").casefold()]
             action = choose_torrent_action(
@@ -916,6 +1106,27 @@ def run_tui(
                     notice = f"ERROR // {action_error}"
                 notice_until = time.monotonic() + 4
                 next_refresh = 0.0
+
+
+def run_tui(
+    screen: curses.window,
+    qbit: QBittorrent,
+    ids: TorrentIds,
+    active_only: bool,
+    interval: float,
+) -> None:
+    try:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        curses.mouseinterval(0)
+    except curses.error:
+        pass
+    try:
+        _run_tui(screen, qbit, ids, active_only, interval)
+    finally:
+        try:
+            curses.mousemask(0)
+        except curses.error:
+            pass
 
 
 def command_list(qbit: QBittorrent, ids: TorrentIds, args: argparse.Namespace) -> None:
