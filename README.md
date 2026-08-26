@@ -23,6 +23,7 @@ qBittorrent removal, and opinionated one-download-at-a-time queue controls.
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
 - high-contrast torrent numbers and a yellow `>` selection marker;
+- clickable `DONE`, `DOWN`, `UP`, `ETA`, and `NAME` sorting headers;
 - keyboard-only scrolling; mouse-wheel events are ignored;
 - name search with live filtering;
 - an Enter-key action menu for starting, pausing/stopping, or deleting the
@@ -112,6 +113,12 @@ too long, the name scrolls horizontally after a short pause; every other long
 name ends with an ellipsis. Use the arrow keys or `j`/`k` to select another
 torrent. Held arrow keys are clamped safely at the first and last torrent.
 Mouse-wheel events are ignored, so scrolling is keyboard-only.
+
+Click `DONE`, `DOWN`, `UP`, `ETA`, or `NAME` to reorder the visible torrents.
+The first click sorts high-to-low (`Z` to `A` for names); another click on the
+same heading reverses the order. A `▼` or `▲` beside the active heading shows
+the current direction. Unknown ETAs always remain below known ETAs. Header
+clicks are the only mouse interaction—mouse-wheel scrolling remains disabled.
 
 - Page Up/Page Down move by one visible page;
 - Home or `g` selects the first torrent;

@@ -14,10 +14,14 @@ from dlm import (
     execute_tui_action,
     filter_torrents,
     filtered_torrents,
+    header_sort_key,
     marquee_name,
     navigation_selection,
+    next_sort_order,
     parse_arguments,
     source_badge,
+    sort_header_label,
+    sort_torrents,
     torrent_table,
     truncate_name,
     tui_rows,
@@ -292,6 +296,85 @@ class DlmTests(unittest.TestCase):
         matches = filter_torrents(torrents, "fear 2160P")
         self.assertEqual(matches, [torrents[0]])
         self.assertEqual(filter_torrents(torrents, ""), torrents)
+
+    def test_click_sorting_toggles_high_low_then_low_high(self):
+        self.assertEqual(next_sort_order(None, True, "done"), ("done", True))
+        self.assertEqual(
+            next_sort_order("done", True, "done"),
+            ("done", False),
+        )
+        self.assertEqual(
+            next_sort_order("done", False, "name"),
+            ("name", True),
+        )
+
+    def test_sortable_headers_map_to_exact_click_regions(self):
+        self.assertEqual(header_sort_key(7, 2, 2), "done")
+        self.assertIsNone(header_sort_key(15, 2, 2))
+        self.assertEqual(header_sort_key(26, 2, 2), "down")
+        self.assertEqual(header_sort_key(37, 2, 2), "up")
+        self.assertEqual(header_sort_key(48, 2, 2), "eta")
+        self.assertEqual(header_sort_key(57, 2, 2), "name")
+
+    def test_torrents_sort_in_both_directions_for_every_header(self):
+        torrents = [
+            {
+                "name": "Alpha",
+                "progress": 0.2,
+                "dlspeed": 30,
+                "upspeed": 2,
+                "eta": 30,
+            },
+            {
+                "name": "Charlie",
+                "progress": 0.9,
+                "dlspeed": 10,
+                "upspeed": 3,
+                "eta": -1,
+            },
+            {
+                "name": "Bravo",
+                "progress": 0.5,
+                "dlspeed": 20,
+                "upspeed": 1,
+                "eta": 10,
+            },
+        ]
+
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "name", True)],
+            ["Charlie", "Bravo", "Alpha"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "done", False)],
+            ["Alpha", "Bravo", "Charlie"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "down", True)],
+            ["Alpha", "Bravo", "Charlie"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "up", True)],
+            ["Charlie", "Alpha", "Bravo"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "eta", True)],
+            ["Alpha", "Bravo", "Charlie"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "eta", False)],
+            ["Bravo", "Alpha", "Charlie"],
+        )
+
+    def test_active_sort_header_shows_its_direction(self):
+        self.assertEqual(
+            sort_header_label("DONE", "done", 7, "done", True),
+            " DONE ▼",
+        )
+        self.assertEqual(
+            sort_header_label("NAME", "name", None, "name", False),
+            "NAME ▲",
+        )
 
     def test_held_arrow_keys_remain_clamped_without_invalid_selection(self):
         torrents = [

@@ -710,6 +710,101 @@ def filter_torrents(torrents: list[dict], query: str) -> list[dict]:
     ]
 
 
+def sort_torrents(
+    torrents: list[dict],
+    sort_key: str | None,
+    descending: bool,
+) -> list[dict]:
+    """Sort a filtered list while keeping unknown ETAs at the bottom."""
+    if sort_key is None:
+        return list(torrents)
+    if sort_key == "name":
+        return sorted(
+            torrents,
+            key=lambda item: one_line_name(item.get("name")).casefold(),
+            reverse=descending,
+        )
+    if sort_key == "eta":
+        def eta_value(item: dict) -> int:
+            value = item.get("eta")
+            return int(value) if value is not None else -1
+
+        known = [
+            item
+            for item in torrents
+            if 0 <= eta_value(item) < UNKNOWN_ETA
+        ]
+        unknown = [
+            item
+            for item in torrents
+            if not 0 <= eta_value(item) < UNKNOWN_ETA
+        ]
+        return sorted(
+            known,
+            key=eta_value,
+            reverse=descending,
+        ) + unknown
+    value_fields = {
+        "done": "progress",
+        "down": "dlspeed",
+        "up": "upspeed",
+    }
+    field = value_fields.get(sort_key)
+    if field is None:
+        return list(torrents)
+    return sorted(
+        torrents,
+        key=lambda item: float(item.get(field) or 0),
+        reverse=descending,
+    )
+
+
+def next_sort_order(
+    current_key: str | None,
+    current_descending: bool,
+    clicked_key: str,
+) -> tuple[str, bool]:
+    """A new column starts high-to-low; repeat clicks reverse direction."""
+    if clicked_key == current_key:
+        return clicked_key, not current_descending
+    return clicked_key, True
+
+
+def header_sort_key(mouse_x: int, inner_x: int, id_width: int) -> str | None:
+    """Map a header click to a sortable column; TOTAL and # are inert."""
+    x = inner_x + 2 + id_width + 1
+    for key, field_width in (
+        ("done", 7),
+        (None, 10),
+        ("down", 10),
+        ("up", 10),
+        ("eta", 8),
+    ):
+        if x <= mouse_x < x + field_width:
+            return key
+        x += field_width + 1
+    return "name" if mouse_x >= x else None
+
+
+def is_primary_click(button_state: int) -> bool:
+    click_mask = getattr(curses, "BUTTON1_CLICKED", 0) | getattr(
+        curses, "BUTTON1_PRESSED", 0
+    )
+    return bool(button_state & click_mask)
+
+
+def sort_header_label(
+    label: str,
+    key: str,
+    width: int | None,
+    active_key: str | None,
+    descending: bool,
+) -> str:
+    indicator = "▼" if descending else "▲"
+    value = f"{label} {indicator}" if key == active_key else label
+    return f"{value:>{width}}" if width is not None else value
+
+
 def selected_row_span(
     rows: list[dict | None], selected_index: int
 ) -> tuple[int, int] | None:
@@ -801,6 +896,8 @@ def draw_tui(
     search_query: str,
     total_torrents: int,
     selected_elapsed: float,
+    sort_key: str | None,
+    sort_descending: bool,
 ) -> tuple[int, int, list[dict | None]]:
     screen.erase()
     height, width = screen.getmaxyx()
@@ -860,8 +957,13 @@ def draw_tui(
 
     rows, id_width, prefix_width = tui_rows(torrents, ids, inner_width)
     header = (
-        f"  {'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
-        f"{'UP':>10} {'ETA':>8} NAME"
+        f"  {'#':>{id_width}} "
+        f"{sort_header_label('DONE', 'done', 7, sort_key, sort_descending)} "
+        f"{'TOTAL':>10} "
+        f"{sort_header_label('DOWN', 'down', 10, sort_key, sort_descending)} "
+        f"{sort_header_label('UP', 'up', 10, sort_key, sort_descending)} "
+        f"{sort_header_label('ETA', 'eta', 8, sort_key, sort_descending)} "
+        f"{sort_header_label('NAME', 'name', None, sort_key, sort_descending)}"
     )
     tui_addstr(screen, 4, inner_x, header, attributes["header"], inner_width)
 
@@ -946,7 +1048,8 @@ def draw_tui(
         status_attribute = attributes["footer"]
     else:
         status = (
-            f"[ENTER] ACTION  [S] SEARCH  [Q] QUIT  [ARROWS] SELECT  "
+            f"[ENTER] ACTION  [S] SEARCH  [Q] QUIT  [CLICK HEADER] SORT  "
+            f"[ARROWS] SELECT  "
             f"[PGUP/PGDN] PAGE  [HOME/END] JUMP  //  AUTO {interval:g}s"
         )
         if search_query:
@@ -1216,6 +1319,10 @@ def _run_tui(
     notice_until = 0.0
     next_refresh = 0.0
     selected_since = time.monotonic()
+    sort_key: str | None = None
+    sort_descending = True
+    last_header_click_key: str | None = None
+    last_header_click_at = 0.0
 
     while True:
         now = time.monotonic()
@@ -1232,7 +1339,11 @@ def _run_tui(
                     ids,
                     active_only,
                 )
-                torrents = filter_torrents(all_torrents, search_query)
+                torrents = sort_torrents(
+                    filter_torrents(all_torrents, search_query),
+                    sort_key,
+                    sort_descending,
+                )
                 if selected_hash:
                     selected_index = next(
                         (
@@ -1270,6 +1381,8 @@ def _run_tui(
             search_query,
             len(all_torrents),
             max(0.0, time.monotonic() - selected_since),
+            sort_key,
+            sort_descending,
         )
         scroll = min(
             max_scroll,
@@ -1280,13 +1393,52 @@ def _run_tui(
             return
         if key == curses.KEY_MOUSE:
             try:
-                curses.getmouse()
+                _, mouse_x, mouse_y, _, button_state = curses.getmouse()
             except curses.error:
-                pass
+                continue
+            if mouse_y != 4 or not is_primary_click(button_state):
+                # Wheel events and clicks outside the sortable header remain
+                # intentionally inert.
+                continue
+            id_width = max(
+                2,
+                max((len(str(value)) for value in id_map.values()), default=1),
+            )
+            clicked_key = header_sort_key(mouse_x, 2, id_width)
+            if clicked_key is None:
+                continue
+            click_time = time.monotonic()
+            if (
+                clicked_key == last_header_click_key
+                and click_time - last_header_click_at < 0.12
+            ):
+                continue
+            last_header_click_key = clicked_key
+            last_header_click_at = click_time
+            sort_key, sort_descending = next_sort_order(
+                sort_key,
+                sort_descending,
+                clicked_key,
+            )
+            torrents = sort_torrents(
+                filter_torrents(all_torrents, search_query),
+                sort_key,
+                sort_descending,
+            )
+            selected_index = 0
+            selected_since = click_time
+            scroll = 0
+            direction = "HIGH TO LOW" if sort_descending else "LOW TO HIGH"
+            notice = f"SORT {sort_key.upper()} // {direction}"
+            notice_until = click_time + 2
             continue
         if key == 27 and search_query:
             search_query = ""
-            torrents = filter_torrents(all_torrents, search_query)
+            torrents = sort_torrents(
+                filter_torrents(all_torrents, search_query),
+                sort_key,
+                sort_descending,
+            )
             selected_index = 0
             selected_since = time.monotonic()
             scroll = 0
@@ -1297,7 +1449,11 @@ def _run_tui(
             new_query = search_prompt(screen, attributes, search_query)
             if new_query:
                 search_query = new_query
-                torrents = filter_torrents(all_torrents, search_query)
+                torrents = sort_torrents(
+                    filter_torrents(all_torrents, search_query),
+                    sort_key,
+                    sort_descending,
+                )
                 selected_index = 0
                 selected_since = time.monotonic()
                 scroll = 0
@@ -1355,7 +1511,7 @@ def run_tui(
 ) -> None:
     try:
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
-        curses.mouseinterval(0)
+        curses.mouseinterval(150)
     except curses.error:
         pass
     try:
