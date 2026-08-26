@@ -1,9 +1,9 @@
 # DLM
 
-DLM is a dependency-free, full-screen terminal client for managing a
-qBittorrent download queue and viewing torrents from Transmission. It provides
-readable live progress, persistent numeric torrent IDs, confirmed destructive
-qBittorrent removal, and configurable non-stalled download queue controls.
+DLM is a dependency-free, full-screen terminal client for managing torrents
+from qBittorrent and Transmission in one queue. It provides readable live
+progress, persistent numeric torrent IDs, confirmed destructive removal, and
+configurable non-stalled qBittorrent queue controls.
 
 ```text
    #    DONE      TOTAL       DOWN         UP      ETA NAME
@@ -14,6 +14,18 @@ qBittorrent removal, and configurable non-stalled download queue controls.
 ------------------------------------------------------------------------
      9.89%   10.54GiB   585KiB/s       0B/s       -- TOTAL (2)
 ```
+
+## Interface
+
+![DLM combined qBittorrent and Transmission dashboard](docs/screenshots/dashboard.png)
+
+The source badge makes every entry unambiguous: `QB` is qBittorrent and `TR`
+is Transmission. The dashboard above is a current capture from Beast.
+
+![DLM Transmission torrent action menu](docs/screenshots/transmission-actions.png)
+
+Transmission torrents use the same immediate keyboard action menu as
+qBittorrent torrents.
 
 ## Features
 
@@ -28,16 +40,18 @@ qBittorrent removal, and configurable non-stalled download queue controls.
   active-download count and global download-speed limit;
 - keyboard-only scrolling; mouse-wheel events are ignored;
 - name search with live filtering;
-- an Enter-key action menu for starting, pausing/stopping, or deleting the
-  selected torrent;
+- an Enter-key action menu for starting, pausing/stopping, or deleting selected
+  qBittorrent and Transmission torrents;
 - every torrent stays on one data row with a blank spacer beneath it;
 - inactive long names are truncated with an ellipsis, while the selected name
   automatically scrolls toward the right until the complete name is revealed;
 - persistent numeric IDs, so commands never require torrent hashes;
 - automatic refresh plus keyboard navigation and refresh controls;
 - low-latency menus and Escape cancellation with input prioritized over refresh;
-- stop every torrent and restart the queue from the terminal;
-- delete a qBittorrent job together with all of its downloaded files;
+- stop every qBittorrent torrent and restart its managed queue from the
+  terminal;
+- delete a selected qBittorrent or Transmission torrent together with all of
+  its downloaded files from the dashboard;
 - Python standard library only—no runtime packages.
 
 ## Requirements
@@ -141,17 +155,19 @@ Press `s` to search torrent names. Every space-separated search word must
 appear in the name. Press Enter to apply the search. Esc cancels search entry;
 once a search is active, Esc clears it and restores the full list.
 
-Press Enter on a selected `QB` torrent to open its action menu:
+Press Enter on any selected torrent to open its action menu:
 
-- `START / RESUME` starts the selected torrent under DLM's configured active-
-  download limit;
+- `START / RESUME` starts the selected torrent;
 - `PAUSE / STOP` stops the selected torrent;
 - `DELETE + DATA` removes the torrent and its downloaded files after a second
   confirmation dialog.
 
-`TR` entries are list-only. Pressing Enter on one displays a notice and never
-routes the torrent to a qBittorrent action. Use `transmission-remote` when a
-Transmission torrent needs to be changed.
+For a `QB` entry, start is governed by DLM's configured qBittorrent active-
+download limit. For a `TR` entry, DLM sends `torrent-start`, `torrent-stop`, or
+`torrent-remove` to Transmission's RPC service using that torrent's actual
+Transmission ID. Destructive removal sets `delete-local-data=true`, so
+`DELETE + DATA` permanently removes the Transmission torrent and its media
+from Beast.
 
 Use the arrow keys and Enter inside a menu. Esc is the consistent cancel/clear
 key for search, action menus, and delete confirmation. Press `q` to close DLM.
@@ -196,7 +212,9 @@ dlm remove 12
 
 `remove` displays the torrent name and asks for confirmation, then sends
 `deleteFiles=true` to qBittorrent. This permanently deletes the job and its
-downloaded files from the qBittorrent host. To skip the prompt deliberately:
+downloaded files from the qBittorrent host. This command is qBittorrent-
+specific; use a selected `TR` torrent's dashboard action menu for Transmission.
+To skip the prompt deliberately:
 
 ```sh
 dlm remove 12 --yes

@@ -395,7 +395,7 @@ class QBittorrent:
 
 
 class Transmission:
-    """Read structured torrent data from Transmission's local RPC service."""
+    """Read and control torrents through Transmission's RPC service."""
 
     FIELDS = (
         "id",
@@ -455,6 +455,18 @@ class Transmission:
             return dict(payload.get("arguments") or {})
         raise RuntimeError("Transmission RPC session negotiation failed")
 
+    def start(self, torrent_id: int | str) -> None:
+        self.call("torrent-start", {"ids": [torrent_id]})
+
+    def stop(self, torrent_id: int | str) -> None:
+        self.call("torrent-stop", {"ids": [torrent_id]})
+
+    def remove_with_files(self, torrent_id: int | str) -> None:
+        self.call(
+            "torrent-remove",
+            {"ids": [torrent_id], "delete-local-data": True},
+        )
+
     def torrents(self) -> list[dict]:
         if not self.url:
             return []
@@ -464,8 +476,8 @@ class Transmission:
                 {"fields": list(self.FIELDS)},
             )
         except (OSError, RuntimeError, ValueError, urllib.error.URLError) as error:
-            # Transmission is an optional list source. A stopped or absent
-            # daemon must not make the qBittorrent dashboard unusable.
+            # Transmission is an optional secondary client. A stopped or
+            # absent daemon must not make the qBittorrent dashboard unusable.
             self.last_error = str(error)
             return []
         self.last_error = None
@@ -1485,9 +1497,10 @@ def choose_torrent_action(
     attributes: dict[str, int],
 ) -> str | None:
     name = str(torrent.get("name") or "(unnamed)")
+    source = "TR" if torrent_source(torrent) == "transmission" else "QB"
     action = modal_menu(
         screen,
-        f"TORRENT #{torrent_id} // ACTION",
+        f"{source} TORRENT #{torrent_id} // ACTION",
         name,
         TUI_ACTIONS,
         attributes,
@@ -1506,7 +1519,31 @@ def choose_torrent_action(
     return "delete" if confirmation == "delete" else None
 
 
-def execute_tui_action(qbit: QBittorrent, torrent: dict, action: str) -> str:
+def execute_tui_action(
+    qbit: QBittorrent,
+    torrent: dict,
+    action: str,
+    transmission: Transmission | None = None,
+) -> str:
+    if torrent_source(torrent) == "transmission":
+        if transmission is None:
+            raise RuntimeError("Transmission RPC is unavailable")
+        torrent_id: int | str = int(torrent.get("source_id") or 0)
+        if not torrent_id:
+            torrent_id = str(torrent.get("source_hash") or "")
+        if not torrent_id:
+            raise RuntimeError("Selected Transmission torrent has no RPC ID")
+        if action == "start":
+            transmission.start(torrent_id)
+            return "STARTED"
+        if action == "stop":
+            transmission.stop(torrent_id)
+            return "PAUSED / STOPPED"
+        if action == "delete":
+            transmission.remove_with_files(torrent_id)
+            return "DELETED TORRENT + DATA"
+        raise RuntimeError(f"Unknown torrent action: {action}")
+
     torrent_hash = str(torrent.get("hash") or "")
     if not torrent_hash:
         raise RuntimeError("Selected torrent has no hash")
@@ -1784,12 +1821,6 @@ def _run_tui(
 
         if key in {curses.KEY_ENTER, 10, 13} and torrents:
             selected = torrents[selected_index]
-            if torrent_source(selected) == "transmission":
-                notice = (
-                    "TRANSMISSION // LIST ONLY // USE transmission-remote TO CONTROL"
-                )
-                notice_until = time.monotonic() + 4
-                continue
             torrent_id = id_map[str(selected.get("hash") or "").casefold()]
             action = choose_torrent_action(
                 screen, selected, torrent_id, attributes
@@ -1801,7 +1832,9 @@ def _run_tui(
                 )
             if action:
                 try:
-                    result = execute_tui_action(qbit, selected, action)
+                    result = execute_tui_action(
+                        qbit, selected, action, transmission
+                    )
                     notice = f"{result} // #{torrent_id} {selected.get('name') or '(unnamed)'}"
                 except Exception as action_error:
                     notice = f"ERROR // {action_error}"

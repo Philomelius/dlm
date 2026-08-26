@@ -220,6 +220,55 @@ class DlmTests(unittest.TestCase):
         )
         delete_client.remove_with_files.assert_called_once_with("abc")
 
+    def test_tui_actions_map_to_transmission_rpc_operations(self):
+        qbit = Mock()
+        transmission = Mock()
+        torrent = {
+            "hash": "transmission:abc",
+            "source": "transmission",
+            "source_hash": "abc",
+            "source_id": 17,
+        }
+
+        self.assertEqual(
+            execute_tui_action(qbit, torrent, "start", transmission),
+            "STARTED",
+        )
+        transmission.start.assert_called_once_with(17)
+
+        self.assertEqual(
+            execute_tui_action(qbit, torrent, "stop", transmission),
+            "PAUSED / STOPPED",
+        )
+        transmission.stop.assert_called_once_with(17)
+
+        self.assertEqual(
+            execute_tui_action(qbit, torrent, "delete", transmission),
+            "DELETED TORRENT + DATA",
+        )
+        transmission.remove_with_files.assert_called_once_with(17)
+        qbit.assert_not_called()
+
+    def test_transmission_actions_use_expected_remote_rpc_calls(self):
+        transmission = Transmission("http://transmission.invalid/rpc")
+        transmission.call = Mock(return_value={})
+
+        transmission.start(7)
+        transmission.call.assert_called_once_with("torrent-start", {"ids": [7]})
+
+        transmission.call.reset_mock()
+        transmission.stop("hash")
+        transmission.call.assert_called_once_with(
+            "torrent-stop", {"ids": ["hash"]}
+        )
+
+        transmission.call.reset_mock()
+        transmission.remove_with_files(7)
+        transmission.call.assert_called_once_with(
+            "torrent-remove",
+            {"ids": [7], "delete-local-data": True},
+        )
+
     def test_tui_stats_summarize_the_queue(self):
         stats = tui_stats(
             [
