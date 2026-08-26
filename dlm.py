@@ -193,11 +193,11 @@ class QBittorrent:
             json=json.dumps(QUEUE_PREFERENCES, separators=(",", ":")),
         )
 
-    def remove_without_files(self, torrent_hash: str) -> None:
+    def remove_with_files(self, torrent_hash: str) -> None:
         self.post(
             "/api/v2/torrents/delete",
             hashes=torrent_hash,
-            deleteFiles="false",
+            deleteFiles="true",
         )
 
 
@@ -338,17 +338,31 @@ def command_start(qbit: QBittorrent) -> None:
     )
 
 
-def command_remove(qbit: QBittorrent, ids: TorrentIds, torrent_id: int) -> None:
+def command_remove(
+    qbit: QBittorrent,
+    ids: TorrentIds,
+    torrent_id: int,
+    assume_yes: bool = False,
+) -> None:
     if torrent_id < 1:
         raise RuntimeError("Torrent number must be a positive integer")
     torrents = qbit.torrents()
     torrent = ids.current_by_id(torrents, torrent_id)
     if torrent is None:
         raise RuntimeError(f"Torrent #{torrent_id} does not exist; run 'dlm list'")
-    qbit.remove_without_files(str(torrent["hash"]))
+    name = str(torrent.get("name") or "(unnamed)")
+    if not assume_yes:
+        answer = input(
+            f'Delete #{torrent_id} "{name}" and all its downloaded files '
+            "from Beast? [y/N] "
+        )
+        if answer.strip().casefold() not in {"y", "yes"}:
+            print("Cancelled. Nothing was deleted.")
+            return
+    qbit.remove_with_files(str(torrent["hash"]))
     print(
-        f"Removed #{torrent_id}: {torrent.get('name') or '(unnamed)'}\n"
-        "Downloaded files were preserved."
+        f"Removed #{torrent_id}: {name}\n"
+        "The torrent and its downloaded files were deleted from Beast."
     )
 
 
@@ -378,9 +392,15 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("stop", help="stop all torrents")
     commands.add_parser("start", help="restart the single-download queue")
     remove_parser = commands.add_parser(
-        "remove", help="remove a torrent job while preserving downloaded files"
+        "remove", help="delete a torrent and its downloaded files from Beast"
     )
     remove_parser.add_argument("torrent_number", type=int, metavar="NUMBER")
+    remove_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="skip the destructive-action confirmation prompt",
+    )
     return result
 
 
@@ -397,7 +417,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "start":
             command_start(qbit)
         elif args.command == "remove":
-            command_remove(qbit, ids, args.torrent_number)
+            command_remove(qbit, ids, args.torrent_number, args.yes)
     except Exception as error:
         print(f"dlm: {error}", file=sys.stderr)
         raise SystemExit(1) from error

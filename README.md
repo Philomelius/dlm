@@ -2,7 +2,8 @@
 
 DLM is a small, dependency-free terminal client for managing a qBittorrent
 download queue. It provides readable live progress, persistent numeric torrent
-IDs, safe job removal, and opinionated one-download-at-a-time queue controls.
+IDs, confirmed destructive removal, and opinionated one-download-at-a-time
+queue controls.
 
 ```text
  #    DONE      TOTAL       DOWN         UP      ETA NAME
@@ -20,7 +21,7 @@ IDs, safe job removal, and opinionated one-download-at-a-time queue controls.
 - persistent numeric IDs, so commands never require torrent hashes;
 - live watch mode;
 - stop every torrent and restart the queue from the terminal;
-- remove a qBittorrent job while explicitly preserving downloaded files;
+- delete a qBittorrent job together with all of its downloaded files;
 - Python standard library only—no runtime packages.
 
 ## Requirements
@@ -113,8 +114,13 @@ Remove the job shown as `12` by `dlm list`:
 dlm remove 12
 ```
 
-`remove` always sends `deleteFiles=false` to qBittorrent. It removes the
-torrent job but preserves its downloaded files and organized media.
+`remove` displays the torrent name and asks for confirmation, then sends
+`deleteFiles=true` to qBittorrent. This permanently deletes the job and its
+downloaded files from the qBittorrent host. To skip the prompt deliberately:
+
+```sh
+dlm remove 12 --yes
+```
 
 ## Queue behavior
 

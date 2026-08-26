@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from dlm import QBittorrent, TorrentIds, torrent_table
+from dlm import QBittorrent, TorrentIds, command_remove, torrent_table
 
 
 class DlmTests(unittest.TestCase):
@@ -41,15 +41,27 @@ class DlmTests(unittest.TestCase):
         for word in name.split():
             self.assertIn(word, table)
 
-    def test_remove_explicitly_preserves_downloaded_files(self):
+    def test_remove_explicitly_deletes_downloaded_files(self):
         qbit = QBittorrent.__new__(QBittorrent)
         qbit.post = Mock()
-        qbit.remove_without_files("hash")
+        qbit.remove_with_files("hash")
         qbit.post.assert_called_once_with(
             "/api/v2/torrents/delete",
             hashes="hash",
-            deleteFiles="false",
+            deleteFiles="true",
         )
+
+    def test_remove_command_deletes_selected_torrent_and_files(self):
+        qbit = Mock()
+        qbit.torrents.return_value = [
+            {"hash": "abc", "name": "Example", "progress": 0.5}
+        ]
+        ids = Mock()
+        ids.current_by_id.return_value = qbit.torrents.return_value[0]
+
+        command_remove(qbit, ids, 7, assume_yes=True)
+
+        qbit.remove_with_files.assert_called_once_with("abc")
 
 
 if __name__ == "__main__":
