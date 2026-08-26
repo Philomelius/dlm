@@ -33,6 +33,7 @@ qBittorrent removal, and opinionated one-download-at-a-time queue controls.
   automatically scrolls toward the right until the complete name is revealed;
 - persistent numeric IDs, so commands never require torrent hashes;
 - automatic refresh plus keyboard navigation and refresh controls;
+- low-latency menus and Escape cancellation with input prioritized over refresh;
 - stop every torrent and restart the queue from the terminal;
 - delete a qBittorrent job together with all of its downloaded files;
 - Python standard library only—no runtime packages.
@@ -123,6 +124,9 @@ clicks are the only mouse interaction—mouse-wheel scrolling remains disabled.
 - Page Up/Page Down move by one visible page;
 - Home or `g` selects the first torrent;
 - End or `G` selects the final torrent;
+- Ctrl+Up jumps to the first torrent and Ctrl+Down jumps to the final torrent;
+- two quick Up presses move one page up, while two quick Down presses move one
+  page down; a single arrow press still moves immediately by one torrent;
 - `r` refreshes immediately.
 
 Press `s` to search torrent names. Every space-separated search word must

@@ -59,6 +59,13 @@ ANSI_YELLOW = "\033[93m"
 ANSI_WHITE = "\033[97m"
 TUI_MIN_WIDTH = 74
 TUI_MIN_HEIGHT = 12
+TUI_INPUT_TIMEOUT_MS = 20
+TUI_ESCAPE_DELAY_MS = 25
+TUI_DOUBLE_ARROW_SECONDS = 0.35
+# ncurses' xterm extended-key codes for kUP5 and kDN5. Python exposes these
+# through getch() even though they sit above curses.KEY_MAX.
+TUI_CTRL_UP = 567
+TUI_CTRL_DOWN = 526
 TUI_ACTIONS = (
     ("START / RESUME", "start"),
     ("PAUSE / STOP", "stop"),
@@ -880,7 +887,92 @@ def navigation_selection(
         return 0
     if key in {curses.KEY_END, ord("G")}:
         return last
+    if key == TUI_CTRL_UP:
+        return 0
+    if key == TUI_CTRL_DOWN:
+        return last
     return selected_index
+
+
+class ArrowTapTracker:
+    """Accelerate a double arrow tap without delaying a normal single tap."""
+
+    def __init__(self, timeout: float = TUI_DOUBLE_ARROW_SECONDS) -> None:
+        self.timeout = timeout
+        self.last_key: int | None = None
+        self.last_at = 0.0
+        self.origin = 0
+
+    def reset(self) -> None:
+        self.last_key = None
+        self.last_at = 0.0
+
+    def navigate(
+        self,
+        key: int,
+        rows: list[dict | None],
+        selected_index: int,
+        page_size: int,
+        torrent_count: int,
+        now: float | None = None,
+    ) -> int:
+        if key not in {curses.KEY_UP, curses.KEY_DOWN}:
+            self.reset()
+            return navigation_selection(
+                key,
+                rows,
+                selected_index,
+                page_size,
+                torrent_count,
+            )
+        timestamp = time.monotonic() if now is None else now
+        direction = -1 if key == curses.KEY_UP else 1
+        if key == self.last_key and timestamp - self.last_at <= self.timeout:
+            origin = self.origin
+            self.reset()
+            return page_selection(
+                rows,
+                origin,
+                page_size,
+                direction,
+                torrent_count,
+            )
+        self.last_key = key
+        self.last_at = timestamp
+        self.origin = selected_index
+        return navigation_selection(
+            key,
+            rows,
+            selected_index,
+            page_size,
+            torrent_count,
+        )
+
+
+def configure_tui_input(screen: curses.window) -> None:
+    """Install low-latency Escape handling and modified-arrow key mappings."""
+    try:
+        curses.set_escdelay(TUI_ESCAPE_DELAY_MS)
+    except (AttributeError, curses.error):
+        pass
+    for sequence, key_code in (
+        ("\x1b[1;5A", TUI_CTRL_UP),
+        ("\x1b[1;5B", TUI_CTRL_DOWN),
+    ):
+        try:
+            curses.define_key(sequence, key_code)
+        except (AttributeError, curses.error):
+            pass
+    screen.timeout(TUI_INPUT_TIMEOUT_MS)
+
+
+def pending_key(screen: curses.window) -> int:
+    """Poll without waiting so user input wins over a scheduled refresh."""
+    screen.timeout(0)
+    try:
+        return screen.getch()
+    finally:
+        screen.timeout(TUI_INPUT_TIMEOUT_MS)
 
 
 def draw_tui(
@@ -1306,8 +1398,9 @@ def _run_tui(
     except curses.error:
         pass
     screen.keypad(True)
-    screen.timeout(50)
+    configure_tui_input(screen)
     attributes = tui_attributes()
+    arrow_taps = ArrowTapTracker()
     all_torrents: list[dict] = []
     torrents: list[dict] = []
     id_map: dict[str, int] = {}
@@ -1326,7 +1419,10 @@ def _run_tui(
 
     while True:
         now = time.monotonic()
+        queued_key = -1
         if now >= next_refresh:
+            queued_key = pending_key(screen)
+        if now >= next_refresh and queued_key == -1:
             try:
                 selected_hash = (
                     str(torrents[selected_index].get("hash") or "")
@@ -1388,7 +1484,9 @@ def _run_tui(
             max_scroll,
             ensure_selected_visible(rows, selected_index, scroll, page_size),
         )
-        key = screen.getch()
+        key = queued_key if queued_key != -1 else screen.getch()
+        if key not in {curses.KEY_UP, curses.KEY_DOWN}:
+            arrow_taps.reset()
         if key in {ord("q"), ord("Q")}:
             return
         if key == curses.KEY_MOUSE:
@@ -1447,6 +1545,10 @@ def _run_tui(
             continue
         if key in {ord("s"), ord("S")}:
             new_query = search_prompt(screen, attributes, search_query)
+            next_refresh = max(
+                next_refresh,
+                time.monotonic() + 0.25,
+            )
             if new_query:
                 search_query = new_query
                 torrents = sort_torrents(
@@ -1464,7 +1566,7 @@ def _run_tui(
             next_refresh = 0.0
             continue
 
-        new_selection = navigation_selection(
+        new_selection = arrow_taps.navigate(
             key,
             rows,
             selected_index,
@@ -1491,6 +1593,11 @@ def _run_tui(
             action = choose_torrent_action(
                 screen, selected, torrent_id, attributes
             )
+            if action is None:
+                next_refresh = max(
+                    next_refresh,
+                    time.monotonic() + 0.25,
+                )
             if action:
                 try:
                     result = execute_tui_action(qbit, selected, action)

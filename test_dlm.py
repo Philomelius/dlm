@@ -2,10 +2,14 @@ import curses
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 from dlm import (
+    ArrowTapTracker,
     QBittorrent,
+    TUI_CTRL_DOWN,
+    TUI_CTRL_UP,
+    TUI_INPUT_TIMEOUT_MS,
     TUI_ACTIONS,
     Transmission,
     TorrentIds,
@@ -19,6 +23,7 @@ from dlm import (
     navigation_selection,
     next_sort_order,
     parse_arguments,
+    pending_key,
     source_badge,
     sort_header_label,
     sort_torrents,
@@ -399,6 +404,7 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(selected, 0)
 
     def test_page_home_top_and_end_navigation(self):
+        self.assertEqual((TUI_CTRL_UP, TUI_CTRL_DOWN), (567, 526))
         torrents = [
             {"hash": str(index), "name": f"Torrent {index}", "size": 0}
             for index in range(10)
@@ -431,6 +437,89 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(
             navigation_selection(curses.KEY_MOUSE, rows, 4, 5, 10),
             4,
+        )
+        self.assertEqual(
+            navigation_selection(TUI_CTRL_UP, rows, 9, 5, 10),
+            0,
+        )
+        self.assertEqual(
+            navigation_selection(TUI_CTRL_DOWN, rows, 0, 5, 10),
+            9,
+        )
+
+    def test_double_arrow_taps_move_by_a_page_without_single_tap_delay(self):
+        torrents = [
+            {"hash": str(index), "name": f"Torrent {index}", "size": 0}
+            for index in range(20)
+        ]
+        rows, _, _ = tui_rows(
+            torrents,
+            {str(index): index + 1 for index in range(20)},
+            100,
+        )
+        tracker = ArrowTapTracker(timeout=0.35)
+
+        first_up = tracker.navigate(curses.KEY_UP, rows, 10, 5, 20, now=1.0)
+        self.assertEqual(first_up, 9)
+        second_up = tracker.navigate(
+            curses.KEY_UP,
+            rows,
+            first_up,
+            5,
+            20,
+            now=1.1,
+        )
+        self.assertEqual(second_up, 7)
+
+        first_down = tracker.navigate(
+            curses.KEY_DOWN,
+            rows,
+            second_up,
+            5,
+            20,
+            now=2.0,
+        )
+        self.assertEqual(first_down, 8)
+        second_down = tracker.navigate(
+            curses.KEY_DOWN,
+            rows,
+            first_down,
+            5,
+            20,
+            now=2.1,
+        )
+        self.assertEqual(second_down, 10)
+
+    def test_slow_arrow_taps_remain_single_steps(self):
+        torrents = [
+            {"hash": str(index), "name": f"Torrent {index}", "size": 0}
+            for index in range(10)
+        ]
+        rows, _, _ = tui_rows(
+            torrents,
+            {str(index): index + 1 for index in range(10)},
+            100,
+        )
+        tracker = ArrowTapTracker(timeout=0.35)
+        selected = tracker.navigate(curses.KEY_DOWN, rows, 2, 5, 10, now=1.0)
+        selected = tracker.navigate(
+            curses.KEY_DOWN,
+            rows,
+            selected,
+            5,
+            10,
+            now=1.5,
+        )
+        self.assertEqual(selected, 4)
+
+    def test_pending_input_poll_restores_fast_screen_timeout(self):
+        screen = Mock()
+        screen.getch.return_value = 13
+
+        self.assertEqual(pending_key(screen), 13)
+        self.assertEqual(
+            screen.timeout.call_args_list,
+            [call(0), call(TUI_INPUT_TIMEOUT_MS)],
         )
 
     def test_remove_explicitly_deletes_downloaded_files(self):
