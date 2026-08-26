@@ -6,10 +6,11 @@ numeric torrent IDs, confirmed destructive removal, and opinionated
 one-download-at-a-time queue controls.
 
 ```text
- #    DONE      TOTAL       DOWN         UP      ETA NAME
+   #    DONE      TOTAL       DOWN         UP      ETA NAME
 ------------------------------------------------------------------------
- 1   4.21%    5.86GiB   585KiB/s       0B/s    2h40m Example release
- 2  18.34%    4.68GiB       0B/s       0B/s       -- Stalled release
+>  1   4.21%    5.86GiB   585KiB/s       0B/s    2h40m Example release
+
+   2  18.34%    4.68GiB       0B/s       0B/s       -- Stalled release…
 ------------------------------------------------------------------------
      9.89%   10.54GiB   585KiB/s       0B/s       -- TOTAL (2)
 ```
@@ -19,13 +20,14 @@ one-download-at-a-time queue controls.
 - concise `DONE`, `TOTAL`, `DOWN`, `UP`, `ETA`, and `NAME` display;
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
-- highlighted torrent selection with arrow-key navigation;
+- high-contrast torrent numbers and a yellow `>` selection marker;
 - keyboard-only scrolling; mouse-wheel events are ignored;
 - name search with live filtering;
 - an Enter-key action menu for starting, pausing/stopping, or deleting the
   selected torrent;
-- names use the remaining terminal width and wrap back into the `NAME` column,
-  including long dot-separated release names;
+- every torrent stays on one data row with a blank spacer beneath it;
+- inactive long names are truncated with an ellipsis, while the selected name
+  automatically scrolls toward the right until the complete name is revealed;
 - persistent numeric IDs, so commands never require torrent hashes;
 - automatic refresh plus keyboard navigation and refresh controls;
 - stop every torrent and restart the queue from the terminal;
@@ -95,9 +97,12 @@ dlm
 dlm list
 ```
 
-The first torrent is highlighted automatically. Use the arrow keys or `j`/`k`
-to select another torrent. Held arrow keys are clamped safely at the first and
-last torrent. Mouse-wheel events are ignored, so scrolling is keyboard-only.
+The first torrent is selected automatically with a yellow `>` marker and
+high-contrast number/name instead of a reverse-video white bar. If its name is
+too long, the name scrolls horizontally after a short pause; every other long
+name ends with an ellipsis. Use the arrow keys or `j`/`k` to select another
+torrent. Held arrow keys are clamped safely at the first and last torrent.
+Mouse-wheel events are ignored, so scrolling is keyboard-only.
 
 - Page Up/Page Down move by one visible page;
 - Home or `g` selects the first torrent;

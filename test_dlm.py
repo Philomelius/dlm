@@ -12,9 +12,11 @@ from dlm import (
     ensure_selected_visible,
     execute_tui_action,
     filter_torrents,
+    marquee_name,
     navigation_selection,
     parse_arguments,
     torrent_table,
+    truncate_name,
     tui_rows,
     tui_stats,
 )
@@ -33,8 +35,8 @@ class DlmTests(unittest.TestCase):
             self.assertEqual(second["bbb"], 2)
             self.assertEqual(second["ccc"], 3)
 
-    def test_table_has_numbers_and_readable_wrapped_names(self):
-        name = "A long torrent name which needs to wrap cleanly without truncation"
+    def test_table_has_numbers_and_truncates_names_to_one_line(self):
+        name = "A long torrent name which must remain on exactly one row"
         table = torrent_table(
             [
                 {
@@ -51,11 +53,12 @@ class DlmTests(unittest.TestCase):
         self.assertIn("#", table)
         self.assertIn("12.50%", table)
         self.assertNotIn("HASH", table)
-        self.assertNotIn("…", table)
-        for word in name.split():
-            self.assertIn(word, table)
+        self.assertIn("…", table)
+        torrent_rows = table.splitlines()[2:-2]
+        self.assertEqual(len(torrent_rows), 1)
+        self.assertLessEqual(len(torrent_rows[0]), 76)
 
-    def test_long_unbroken_name_wraps_inside_name_column(self):
+    def test_long_unbroken_name_never_wraps_to_the_left_margin(self):
         name = "Cape.Fear.S01E10.The.Executioners.2160p." * 3
         table = torrent_table(
             [
@@ -72,9 +75,9 @@ class DlmTests(unittest.TestCase):
         )
         lines = table.splitlines()
         name_lines = lines[2:-2]
-        self.assertGreater(len(name_lines), 1)
-        self.assertTrue(all(len(line) <= 76 for line in name_lines))
-        self.assertTrue(all(line.startswith(" " * 53) for line in name_lines[1:]))
+        self.assertEqual(len(name_lines), 1)
+        self.assertLessEqual(len(name_lines[0]), 76)
+        self.assertTrue(name_lines[0].endswith("…"))
 
     def test_torrents_have_a_blank_line_between_them(self):
         torrents = [
@@ -94,7 +97,7 @@ class DlmTests(unittest.TestCase):
         self.assertIn("\033[1;36m", table)
         self.assertIn("\033[0m", table)
 
-    def test_tui_rows_wrap_long_names_and_add_spacing(self):
+    def test_tui_rows_keep_one_row_per_torrent_and_add_spacing(self):
         torrents = [
             {
                 "hash": "a",
@@ -105,18 +108,26 @@ class DlmTests(unittest.TestCase):
             {"hash": "b", "name": "Second", "progress": 0, "size": 0},
         ]
         rows, _, prefix_width = tui_rows(torrents, {"a": 20, "b": 21}, 76)
-        continuation_rows = [
-            row for row in rows if row and bool(row["continuation"])
-        ]
-        self.assertTrue(continuation_rows)
-        self.assertTrue(
-            all(
-                len(str(row["name"])) <= 76 - prefix_width
-                for row in continuation_rows
-            )
-        )
-        self.assertIn(None, rows)
+        self.assertEqual(len(rows), 3)
+        self.assertIsNone(rows[1])
         self.assertEqual(rows[0]["torrent_index"], 0)
+        self.assertEqual(rows[2]["torrent_index"], 1)
+        self.assertEqual(rows[0]["name"], torrents[0]["name"])
+        self.assertEqual(prefix_width, 55)
+
+    def test_names_are_truncated_and_selected_names_marquee_to_the_right(self):
+        name = "ABCDEFGHIJ"
+        self.assertEqual(truncate_name(name, 5), "ABCD…")
+        self.assertEqual(truncate_name("short", 5), "short")
+        self.assertEqual(marquee_name(name, 4, 0), "ABCD")
+        self.assertEqual(
+            marquee_name(name, 4, 3.1, step_time=1.0),
+            "CDEF",
+        )
+        self.assertEqual(
+            marquee_name(name, 4, 7.1, step_time=1.0),
+            "GHIJ",
+        )
 
     def test_selected_torrent_is_scrolled_into_view(self):
         torrents = [

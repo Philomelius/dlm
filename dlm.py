@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import shutil
 import sys
-import textwrap
 import time
 import urllib.error
 import urllib.parse
@@ -39,7 +38,6 @@ IDLE_STATES = {"pausedDL", "pausedUP", "queuedDL", "queuedUP", "stoppedDL", "sto
 ANSI_RESET = "\033[0m"
 ANSI_BOLD_CYAN = "\033[1;36m"
 ANSI_DIM = "\033[2m"
-ANSI_BLUE = "\033[94m"
 ANSI_GREEN = "\033[92m"
 ANSI_CYAN = "\033[96m"
 ANSI_MAGENTA = "\033[95m"
@@ -106,6 +104,48 @@ def format_eta(value: int | float | None) -> str:
     if hours:
         return f"{hours}h{minutes:02d}m"
     return f"{minutes}m{seconds:02d}s"
+
+
+def one_line_name(value: object) -> str:
+    """Keep untrusted torrent names from creating extra terminal rows."""
+    return " ".join(str(value or "").split())
+
+
+def truncate_name(name: str, width: int) -> str:
+    """Fit a name on one terminal row and mark hidden text with an ellipsis."""
+    if width <= 0:
+        return ""
+    if len(name) <= width:
+        return name
+    if width == 1:
+        return "…"
+    return f"{name[: width - 1]}…"
+
+
+def marquee_name(
+    name: str,
+    width: int,
+    elapsed: float,
+    start_pause: float = 1.0,
+    step_time: float = 0.12,
+    end_pause: float = 1.0,
+) -> str:
+    """Reveal a selected long name by moving its viewport toward the right."""
+    if width <= 0:
+        return ""
+    if len(name) <= width:
+        return name
+    last_offset = len(name) - width
+    travel_time = last_offset * step_time
+    cycle_time = start_pause + travel_time + end_pause
+    phase = max(0.0, elapsed) % cycle_time
+    if phase < start_pause:
+        offset = 0
+    elif phase >= start_pause + travel_time:
+        offset = last_offset
+    else:
+        offset = min(last_offset, int((phase - start_pause) / step_time))
+    return name[offset : offset + width]
 
 
 class TorrentIds:
@@ -252,7 +292,7 @@ def torrent_table(
     color = terminal_supports_color() if use_color is None else use_color
     id_width = max(2, max((len(str(value)) for value in ids.values()), default=1))
     prefix_width = id_width + 51
-    name_width = max(20, width - prefix_width)
+    name_width = max(1, width - prefix_width)
     header = (
         f"{'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
         f"{'UP':>10} {'ETA':>8} NAME"
@@ -264,22 +304,14 @@ def torrent_table(
 
     for index, torrent in enumerate(torrents):
         torrent_id = ids[str(torrent.get("hash") or "").casefold()]
-        name = str(torrent.get("name") or "")
-        wrapped_name = textwrap.wrap(
-            name,
-            width=name_width,
-            # Dot-separated release names can be wider than the terminal and
-            # otherwise get wrapped by the terminal itself back at column 0.
-            break_long_words=True,
-            break_on_hyphens=False,
-        ) or [""]
+        name = truncate_name(one_line_name(torrent.get("name")), name_width)
         progress = float(torrent.get("progress") or 0)
         down_speed = int(torrent.get("dlspeed") or 0)
         up_speed = int(torrent.get("upspeed") or 0)
         eta = format_eta(torrent.get("eta"))
         row_prefix = "".join(
             (
-                styled(f"{torrent_id:>{id_width}}", ANSI_BLUE, color),
+                styled(f"{torrent_id:>{id_width}}", ANSI_WHITE, color),
                 " ",
                 styled(f"{progress * 100:6.2f}%", ANSI_GREEN, color),
                 " ",
@@ -297,13 +329,7 @@ def torrent_table(
                 " ",
             )
         )
-        rows.append(
-            f"{row_prefix}{styled(wrapped_name[0], ANSI_WHITE, color)}"
-        )
-        rows.extend(
-            f"{'':{prefix_width}}{styled(line, ANSI_WHITE, color)}"
-            for line in wrapped_name[1:]
-        )
+        rows.append(f"{row_prefix}{styled(name, ANSI_WHITE, color)}")
         if index < len(torrents) - 1:
             rows.append("")
 
@@ -368,17 +394,11 @@ def tui_rows(
 ) -> tuple[list[dict | None], int, int]:
     """Build scrollable display rows without embedding terminal control codes."""
     id_width = max(2, max((len(str(value)) for value in ids.values()), default=1))
-    prefix_width = id_width + 51
-    name_width = max(10, width - prefix_width)
+    # Two leading cells are reserved for the selection marker and its space.
+    prefix_width = id_width + 53
     rows: list[dict | None] = []
     for index, torrent in enumerate(torrents):
         torrent_id = ids[str(torrent.get("hash") or "").casefold()]
-        wrapped_name = textwrap.wrap(
-            str(torrent.get("name") or ""),
-            width=name_width,
-            break_long_words=True,
-            break_on_hyphens=False,
-        ) or [""]
         common = {
             "torrent_index": index,
             "id": f"{torrent_id:>{id_width}}",
@@ -391,15 +411,7 @@ def tui_rows(
                 int(torrent.get("dlspeed") or 0) + int(torrent.get("upspeed") or 0)
             ),
         }
-        rows.append({**common, "name": wrapped_name[0], "continuation": False})
-        rows.extend(
-            {
-                **common,
-                "name": line,
-                "continuation": True,
-            }
-            for line in wrapped_name[1:]
-        )
+        rows.append({**common, "name": one_line_name(torrent.get("name"))})
         if index < len(torrents) - 1:
             rows.append(None)
     return rows, id_width, prefix_width
@@ -417,6 +429,7 @@ def tui_attributes() -> dict[str, int]:
         "up": 0,
         "eta": 0,
         "name": 0,
+        "selected": curses.A_BOLD,
         "footer": curses.A_BOLD,
         "error": curses.A_BOLD,
     }
@@ -432,13 +445,14 @@ def tui_attributes() -> dict[str, int]:
         "border": curses.COLOR_CYAN,
         "title": curses.COLOR_CYAN,
         "header": curses.COLOR_CYAN,
-        "id": curses.COLOR_BLUE,
+        "id": curses.COLOR_WHITE,
         "done": curses.COLOR_GREEN,
         "total": curses.COLOR_CYAN,
         "down": curses.COLOR_GREEN,
         "up": curses.COLOR_MAGENTA,
         "eta": curses.COLOR_YELLOW,
         "name": curses.COLOR_WHITE,
+        "selected": curses.COLOR_YELLOW,
         "footer": curses.COLOR_CYAN,
         "error": curses.COLOR_RED,
     }
@@ -601,6 +615,7 @@ def draw_tui(
     notice: str | None,
     search_query: str,
     total_torrents: int,
+    selected_elapsed: float,
 ) -> tuple[int, int, list[dict | None]]:
     screen.erase()
     height, width = screen.getmaxyx()
@@ -660,7 +675,7 @@ def draw_tui(
 
     rows, id_width, prefix_width = tui_rows(torrents, ids, inner_width)
     header = (
-        f"{'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
+        f"  {'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
         f"{'UP':>10} {'ETA':>8} NAME"
     )
     tui_addstr(screen, 4, inner_x, header, attributes["header"], inner_width)
@@ -676,27 +691,16 @@ def draw_tui(
             continue
         y = content_top + offset
         selected = int(row["torrent_index"]) == selected_index
-        highlight = curses.A_REVERSE if selected else 0
-        if selected:
-            tui_addstr(
-                screen,
-                y,
-                inner_x,
-                " " * inner_width,
-                highlight,
-                inner_width,
-            )
-        if bool(row["continuation"]):
-            tui_addstr(
-                screen,
-                y,
-                inner_x + prefix_width,
-                str(row["name"]),
-                attributes["name"] | highlight,
-                inner_width - prefix_width,
-            )
-            continue
-        x = inner_x
+        marker = ">" if selected else " "
+        tui_addstr(
+            screen,
+            y,
+            inner_x,
+            marker,
+            attributes["selected"] if selected else attributes["name"],
+            1,
+        )
+        x = inner_x + 2
         for key, value, field_width in (
             ("id", row["id"], id_width),
             ("done", row["done"], 7),
@@ -710,20 +714,31 @@ def draw_tui(
                 y,
                 x,
                 str(value),
-                attributes[key] | highlight,
+                attributes["selected"]
+                if selected and key == "id"
+                else attributes[key],
                 field_width,
             )
             x += field_width + 1
-        name_attribute = attributes["name"] | highlight | (
+        name_width = max(0, inner_width - prefix_width)
+        full_name = str(row["name"])
+        visible_name = (
+            marquee_name(full_name, name_width, selected_elapsed)
+            if selected
+            else truncate_name(full_name, name_width)
+        )
+        name_attribute = (
+            attributes["selected"] if selected else attributes["name"]
+        ) | (
             curses.A_BOLD if bool(row["active"]) else 0
         )
         tui_addstr(
             screen,
             y,
             x,
-            str(row["name"]),
+            visible_name,
             name_attribute,
-            inner_width - prefix_width,
+            name_width,
         )
 
     tui_hline(screen, height - 3, attributes["border"])
@@ -798,9 +813,11 @@ def modal_menu(
         tui_addstr(menu, 2, 2, subtitle, attributes["name"], menu_width - 4)
         for index, (label, _) in enumerate(options):
             marker = ">" if index == selected else " "
-            option_attribute = attributes["name"]
-            if index == selected:
-                option_attribute |= curses.A_REVERSE | curses.A_BOLD
+            option_attribute = (
+                attributes["selected"]
+                if index == selected
+                else attributes["name"]
+            )
             tui_addstr(
                 menu,
                 4 + index,
@@ -891,7 +908,7 @@ def search_prompt(
                 4,
                 2,
                 f"> {visible_query}",
-                attributes["name"] | curses.A_REVERSE,
+                attributes["selected"],
                 prompt_width - 4,
             )
             tui_addstr(
@@ -1001,6 +1018,7 @@ def _run_tui(
     notice: str | None = None
     notice_until = 0.0
     next_refresh = 0.0
+    selected_since = time.monotonic()
 
     while True:
         now = time.monotonic()
@@ -1024,6 +1042,13 @@ def _run_tui(
                     )
                 else:
                     selected_index = min(selected_index, max(0, len(torrents) - 1))
+                current_hash = (
+                    str(torrents[selected_index].get("hash") or "")
+                    if torrents and selected_index < len(torrents)
+                    else ""
+                )
+                if current_hash != selected_hash:
+                    selected_since = now
                 error = None
             except Exception as refresh_error:
                 error = str(refresh_error)
@@ -1042,6 +1067,7 @@ def _run_tui(
             active_notice,
             search_query,
             len(all_torrents),
+            max(0.0, time.monotonic() - selected_since),
         )
         scroll = min(
             max_scroll,
@@ -1060,6 +1086,7 @@ def _run_tui(
             search_query = ""
             torrents = filter_torrents(all_torrents, search_query)
             selected_index = 0
+            selected_since = time.monotonic()
             scroll = 0
             notice = "SEARCH CLEARED"
             notice_until = time.monotonic() + 2
@@ -1070,6 +1097,7 @@ def _run_tui(
                 search_query = new_query
                 torrents = filter_torrents(all_torrents, search_query)
                 selected_index = 0
+                selected_since = time.monotonic()
                 scroll = 0
                 notice = f'SEARCH "{search_query}" // {len(torrents)} MATCHES'
                 notice_until = time.monotonic() + 3
@@ -1087,6 +1115,7 @@ def _run_tui(
         )
         if new_selection != selected_index:
             selected_index = new_selection
+            selected_since = time.monotonic()
             scroll = ensure_selected_visible(
                 rows, selected_index, scroll, page_size
             )
