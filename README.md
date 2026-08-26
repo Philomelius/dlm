@@ -19,6 +19,9 @@ one-download-at-a-time queue controls.
 - concise `DONE`, `TOTAL`, `DOWN`, `UP`, `ETA`, and `NAME` display;
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
+- highlighted torrent selection with arrow-key navigation;
+- an Enter-key action menu for starting, pausing/stopping, or deleting the
+  selected torrent;
 - names use the remaining terminal width and wrap back into the `NAME` column,
   including long dot-separated release names;
 - persistent numeric IDs, so commands never require torrent hashes;
@@ -83,15 +86,28 @@ to disable them.
 
 ## Commands
 
-Open the full-screen torrent dashboard:
+Open the full-screen torrent dashboard. The two commands are equivalent:
 
 ```sh
+dlm
 dlm list
 ```
 
-The dashboard refreshes every two seconds. Press `q` to close it, use the arrow
-keys or `j`/`k` to scroll, Page Up/Page Down to move by a screen, and `r` to
-refresh immediately.
+The first torrent is highlighted automatically. Use the arrow keys or `j`/`k`
+to select another torrent, Page Up/Page Down to move faster, and `r` to refresh
+immediately. The selected torrent remains visible as the list scrolls.
+
+Press Enter on the selected torrent to open its action menu:
+
+- `START / RESUME` starts the selected torrent under DLM's single-download
+  queue settings;
+- `PAUSE / STOP` stops the selected torrent;
+- `DELETE + DATA` removes the torrent and its downloaded files after a second
+  confirmation dialog.
+
+Use the arrow keys and Enter inside a menu. Press Esc to cancel a menu and `q`
+to close DLM. qBittorrent 5.2 has one stop operation rather than separate pause
+and stop operations, so DLM labels that action `PAUSE / STOP`.
 
 Choose another refresh interval:
 

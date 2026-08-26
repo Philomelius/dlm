@@ -47,6 +47,11 @@ ANSI_YELLOW = "\033[93m"
 ANSI_WHITE = "\033[97m"
 TUI_MIN_WIDTH = 74
 TUI_MIN_HEIGHT = 12
+TUI_ACTIONS = (
+    ("START / RESUME", "start"),
+    ("PAUSE / STOP", "stop"),
+    ("DELETE + DATA", "delete"),
+)
 QUEUE_PREFERENCES = {
     "queueing_enabled": True,
     "max_active_downloads": 1,
@@ -375,6 +380,7 @@ def tui_rows(
             break_on_hyphens=False,
         ) or [""]
         common = {
+            "torrent_index": index,
             "id": f"{torrent_id:>{id_width}}",
             "done": f"{float(torrent.get('progress') or 0) * 100:6.2f}%",
             "total": f"{format_bytes(torrent.get('size') or 0):>10}",
@@ -491,15 +497,45 @@ def tui_stats(torrents: list[dict]) -> str:
     )
 
 
+def selected_row_span(
+    rows: list[dict | None], selected_index: int
+) -> tuple[int, int] | None:
+    matching = [
+        index
+        for index, row in enumerate(rows)
+        if row is not None and int(row["torrent_index"]) == selected_index
+    ]
+    return (matching[0], matching[-1]) if matching else None
+
+
+def ensure_selected_visible(
+    rows: list[dict | None],
+    selected_index: int,
+    scroll: int,
+    page_size: int,
+) -> int:
+    span = selected_row_span(rows, selected_index)
+    if span is None:
+        return 0
+    first, last = span
+    if first < scroll:
+        return first
+    if last >= scroll + page_size:
+        return max(0, last - page_size + 1)
+    return scroll
+
+
 def draw_tui(
     screen: curses.window,
     torrents: list[dict],
     ids: dict[str, int],
     scroll: int,
+    selected_index: int,
     interval: float,
     attributes: dict[str, int],
     error: str | None,
-) -> tuple[int, int]:
+    notice: str | None,
+) -> tuple[int, int, list[dict | None]]:
     screen.erase()
     height, width = screen.getmaxyx()
     try:
@@ -519,7 +555,7 @@ def draw_tui(
             attributes["error"],
         )
         screen.refresh()
-        return 0, 1
+        return 0, 1, []
 
     inner_x = 2
     inner_width = width - 4
@@ -567,13 +603,24 @@ def draw_tui(
         if row is None:
             continue
         y = content_top + offset
+        selected = int(row["torrent_index"]) == selected_index
+        highlight = curses.A_REVERSE if selected else 0
+        if selected:
+            tui_addstr(
+                screen,
+                y,
+                inner_x,
+                " " * inner_width,
+                highlight,
+                inner_width,
+            )
         if bool(row["continuation"]):
             tui_addstr(
                 screen,
                 y,
                 inner_x + prefix_width,
                 str(row["name"]),
-                attributes["name"],
+                attributes["name"] | highlight,
                 inner_width - prefix_width,
             )
             continue
@@ -591,11 +638,11 @@ def draw_tui(
                 y,
                 x,
                 str(value),
-                attributes[key],
+                attributes[key] | highlight,
                 field_width,
             )
             x += field_width + 1
-        name_attribute = attributes["name"] | (
+        name_attribute = attributes["name"] | highlight | (
             curses.A_BOLD if bool(row["active"]) else 0
         )
         tui_addstr(
@@ -611,10 +658,13 @@ def draw_tui(
     if error:
         status = f"ERROR // {error}  //  [R] RETRY  [Q] QUIT"
         status_attribute = attributes["error"]
+    elif notice:
+        status = notice
+        status_attribute = attributes["footer"]
     else:
         status = (
-            f"[Q] QUIT  [R] REFRESH  [J/K or arrows] SCROLL  "
-            f"[PGUP/PGDN] PAGE  //  AUTO {interval:g}s"
+            f"[ENTER] ACTIONS  [Q] QUIT  [R] REFRESH  "
+            f"[J/K or arrows] SELECT  //  AUTO {interval:g}s"
         )
         status_attribute = attributes["footer"]
     first_visible = scroll + 1 if rows else 0
@@ -638,7 +688,127 @@ def draw_tui(
         len(position),
     )
     screen.refresh()
-    return max_scroll, content_height
+    return max_scroll, content_height, rows
+
+
+def modal_menu(
+    screen: curses.window,
+    title: str,
+    subtitle: str,
+    options: tuple[tuple[str, str], ...],
+    attributes: dict[str, int],
+    selected: int = 0,
+) -> str | None:
+    height, width = screen.getmaxyx()
+    menu_width = min(
+        width - 4,
+        max(46, len(title) + 6, len(subtitle) + 6, *(len(label) + 8 for label, _ in options)),
+    )
+    menu_height = len(options) + 6
+    if menu_width < 20 or menu_height > height - 2:
+        return None
+    top = max(1, (height - menu_height) // 2)
+    left = max(1, (width - menu_width) // 2)
+    menu = curses.newwin(menu_height, menu_width, top, left)
+    menu.keypad(True)
+    menu.timeout(-1)
+
+    while True:
+        menu.erase()
+        try:
+            menu.attron(attributes["border"])
+            menu.border()
+            menu.attroff(attributes["border"])
+        except curses.error:
+            pass
+        tui_addstr(menu, 1, 2, title, attributes["title"], menu_width - 4)
+        tui_addstr(menu, 2, 2, subtitle, attributes["name"], menu_width - 4)
+        for index, (label, _) in enumerate(options):
+            marker = ">" if index == selected else " "
+            option_attribute = attributes["name"]
+            if index == selected:
+                option_attribute |= curses.A_REVERSE | curses.A_BOLD
+            tui_addstr(
+                menu,
+                4 + index,
+                3,
+                f"{marker} {label}",
+                option_attribute,
+                menu_width - 6,
+            )
+        tui_addstr(
+            menu,
+            menu_height - 2,
+            2,
+            "ENTER SELECT  //  ESC CANCEL",
+            attributes["footer"],
+            menu_width - 4,
+        )
+        menu.refresh()
+        key = menu.getch()
+        if key == 27:
+            del menu
+            screen.touchwin()
+            return None
+        if key in {curses.KEY_UP, ord("k"), ord("K")}:
+            selected = (selected - 1) % len(options)
+        elif key in {curses.KEY_DOWN, ord("j"), ord("J")}:
+            selected = (selected + 1) % len(options)
+        elif key in {curses.KEY_ENTER, 10, 13}:
+            value = options[selected][1]
+            del menu
+            screen.touchwin()
+            return value
+        elif key == curses.KEY_RESIZE:
+            del menu
+            screen.touchwin()
+            return None
+
+
+def choose_torrent_action(
+    screen: curses.window,
+    torrent: dict,
+    torrent_id: int,
+    attributes: dict[str, int],
+) -> str | None:
+    name = str(torrent.get("name") or "(unnamed)")
+    action = modal_menu(
+        screen,
+        f"TORRENT #{torrent_id} // ACTION",
+        name,
+        TUI_ACTIONS,
+        attributes,
+    )
+    if action != "delete":
+        return action
+    confirmation = modal_menu(
+        screen,
+        "PERMANENT DELETE",
+        f"#{torrent_id} {name}",
+        (
+            ("CANCEL — KEEP TORRENT", "cancel"),
+            ("DELETE TORRENT + DOWNLOADED DATA", "delete"),
+        ),
+        attributes,
+    )
+    return "delete" if confirmation == "delete" else None
+
+
+def execute_tui_action(qbit: QBittorrent, torrent: dict, action: str) -> str:
+    torrent_hash = str(torrent.get("hash") or "")
+    if not torrent_hash:
+        raise RuntimeError("Selected torrent has no hash")
+    if action == "start":
+        qbit.configure_queue()
+        qbit.start(torrent_hash)
+        return "STARTED"
+    if action == "stop":
+        qbit.stop(torrent_hash)
+        return "PAUSED / STOPPED"
+    if action == "delete":
+        qbit.remove_with_files(torrent_hash)
+        return "DELETED TORRENT + DATA"
+    raise RuntimeError(f"Unknown torrent action: {action}")
 
 
 def run_tui(
@@ -659,45 +829,93 @@ def run_tui(
     id_map: dict[str, int] = {}
     error: str | None = None
     scroll = 0
+    selected_index = 0
+    notice: str | None = None
+    notice_until = 0.0
     next_refresh = 0.0
 
     while True:
         now = time.monotonic()
         if now >= next_refresh:
             try:
+                selected_hash = (
+                    str(torrents[selected_index].get("hash") or "")
+                    if torrents and selected_index < len(torrents)
+                    else ""
+                )
                 torrents, id_map = list_torrents(qbit, ids, active_only)
+                if selected_hash:
+                    selected_index = next(
+                        (
+                            index
+                            for index, torrent in enumerate(torrents)
+                            if str(torrent.get("hash") or "") == selected_hash
+                        ),
+                        min(selected_index, max(0, len(torrents) - 1)),
+                    )
+                else:
+                    selected_index = min(selected_index, max(0, len(torrents) - 1))
                 error = None
             except Exception as refresh_error:
                 error = str(refresh_error)
             next_refresh = now + interval
 
-        max_scroll, page_size = draw_tui(
+        active_notice = notice if time.monotonic() < notice_until else None
+        max_scroll, page_size, rows = draw_tui(
             screen,
             torrents,
             id_map,
             scroll,
+            selected_index,
             interval,
             attributes,
             error,
+            active_notice,
         )
-        scroll = min(scroll, max_scroll)
+        scroll = min(
+            max_scroll,
+            ensure_selected_visible(rows, selected_index, scroll, page_size),
+        )
         key = screen.getch()
         if key in {ord("q"), ord("Q")}:
             return
         if key in {ord("r"), ord("R")}:
             next_refresh = 0.0
         elif key in {curses.KEY_DOWN, ord("j"), ord("J")}:
-            scroll = min(max_scroll, scroll + 1)
+            selected_index = min(max(0, len(torrents) - 1), selected_index + 1)
+            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
         elif key in {curses.KEY_UP, ord("k"), ord("K")}:
-            scroll = max(0, scroll - 1)
+            selected_index = max(0, selected_index - 1)
+            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
         elif key in {curses.KEY_NPAGE, ord(" ")}:
-            scroll = min(max_scroll, scroll + page_size)
+            selected_index = min(
+                max(0, len(torrents) - 1),
+                selected_index + max(1, page_size // 2),
+            )
+            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
         elif key == curses.KEY_PPAGE:
-            scroll = max(0, scroll - page_size)
+            selected_index = max(0, selected_index - max(1, page_size // 2))
+            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
         elif key == curses.KEY_HOME:
-            scroll = 0
+            selected_index = 0
+            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
         elif key == curses.KEY_END:
-            scroll = max_scroll
+            selected_index = max(0, len(torrents) - 1)
+            scroll = ensure_selected_visible(rows, selected_index, scroll, page_size)
+        elif key in {curses.KEY_ENTER, 10, 13} and torrents:
+            selected = torrents[selected_index]
+            torrent_id = id_map[str(selected.get("hash") or "").casefold()]
+            action = choose_torrent_action(
+                screen, selected, torrent_id, attributes
+            )
+            if action:
+                try:
+                    result = execute_tui_action(qbit, selected, action)
+                    notice = f"{result} // #{torrent_id} {selected.get('name') or '(unnamed)'}"
+                except Exception as action_error:
+                    notice = f"ERROR // {action_error}"
+                notice_until = time.monotonic() + 4
+                next_refresh = 0.0
 
 
 def command_list(qbit: QBittorrent, ids: TorrentIds, args: argparse.Namespace) -> None:
@@ -788,7 +1006,7 @@ def parser() -> argparse.ArgumentParser:
         prog="dlm",
         description="List and control Beast's qBittorrent download queue.",
     )
-    commands = result.add_subparsers(dest="command", required=True)
+    commands = result.add_subparsers(dest="command")
 
     list_parser = commands.add_parser("list", help="list torrents and progress")
     list_parser.add_argument(
@@ -826,8 +1044,18 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def main(argv: list[str] | None = None) -> None:
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser().parse_args(argv)
+    if args.command is None:
+        args.command = "list"
+        args.watch = None
+        args.active = False
+        args.plain = False
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_arguments(argv)
     try:
         qbit = QBittorrent()
         qbit.login()

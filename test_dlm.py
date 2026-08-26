@@ -5,8 +5,12 @@ from unittest.mock import Mock
 
 from dlm import (
     QBittorrent,
+    TUI_ACTIONS,
     TorrentIds,
     command_remove,
+    ensure_selected_visible,
+    execute_tui_action,
+    parse_arguments,
     torrent_table,
     tui_rows,
     tui_stats,
@@ -109,6 +113,62 @@ class DlmTests(unittest.TestCase):
             )
         )
         self.assertIn(None, rows)
+        self.assertEqual(rows[0]["torrent_index"], 0)
+
+    def test_selected_torrent_is_scrolled_into_view(self):
+        torrents = [
+            {"hash": str(index), "name": f"Torrent {index}", "size": 0}
+            for index in range(4)
+        ]
+        rows, _, _ = tui_rows(
+            torrents,
+            {str(index): index + 1 for index in range(4)},
+            100,
+        )
+        scroll = ensure_selected_visible(
+            rows,
+            selected_index=2,
+            scroll=0,
+            page_size=3,
+        )
+        self.assertEqual(scroll, 2)
+
+    def test_no_subcommand_defaults_to_full_torrent_list(self):
+        args = parse_arguments([])
+        self.assertEqual(args.command, "list")
+        self.assertFalse(args.active)
+        self.assertFalse(args.plain)
+        self.assertIsNone(args.watch)
+
+    def test_tui_actions_map_to_qbittorrent_operations(self):
+        self.assertEqual(
+            TUI_ACTIONS,
+            (
+                ("START / RESUME", "start"),
+                ("PAUSE / STOP", "stop"),
+                ("DELETE + DATA", "delete"),
+            ),
+        )
+        torrent = {"hash": "abc"}
+
+        start_client = Mock()
+        self.assertEqual(execute_tui_action(start_client, torrent, "start"), "STARTED")
+        start_client.configure_queue.assert_called_once_with()
+        start_client.start.assert_called_once_with("abc")
+
+        stop_client = Mock()
+        self.assertEqual(
+            execute_tui_action(stop_client, torrent, "stop"),
+            "PAUSED / STOPPED",
+        )
+        stop_client.stop.assert_called_once_with("abc")
+
+        delete_client = Mock()
+        self.assertEqual(
+            execute_tui_action(delete_client, torrent, "delete"),
+            "DELETED TORRENT + DATA",
+        )
+        delete_client.remove_with_files.assert_called_once_with("abc")
 
     def test_tui_stats_summarize_the_queue(self):
         stats = tui_stats(
