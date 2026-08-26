@@ -8,6 +8,7 @@ import curses
 from datetime import datetime
 import http.cookiejar
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -21,6 +22,10 @@ import urllib.request
 BASE_URL = os.environ.get("DLM_QBITTORRENT_URL", "http://192.168.1.27:8080").rstrip(
     "/"
 )
+TRANSMISSION_URL = os.environ.get(
+    "DLM_TRANSMISSION_URL",
+    "http://127.0.0.1:9091/transmission/rpc",
+).strip()
 CREDENTIALS_PATH = Path(
     os.environ.get(
         "DLM_CREDENTIALS_FILE",
@@ -35,6 +40,15 @@ STATE_PATH = Path(
 )
 UNKNOWN_ETA = 8_640_000
 IDLE_STATES = {"pausedDL", "pausedUP", "queuedDL", "queuedUP", "stoppedDL", "stoppedUP"}
+TRANSMISSION_STATES = {
+    0: "stoppedDL",
+    1: "queuedDL",
+    2: "checkingDL",
+    3: "queuedDL",
+    4: "downloading",
+    5: "queuedUP",
+    6: "uploading",
+}
 ANSI_RESET = "\033[0m"
 ANSI_BOLD_CYAN = "\033[1;36m"
 ANSI_DIM = "\033[2m"
@@ -167,8 +181,24 @@ class TorrentIds:
 
     def sync(self, torrents: list[dict]) -> dict[str, int]:
         changed = False
+        qbit_hashes = {
+            str(torrent.get("hash") or "").casefold()
+            for torrent in torrents
+            if torrent.get("source") != "transmission"
+        }
         for torrent in torrents:
             torrent_hash = str(torrent.get("hash") or "").casefold()
+            source_hash = str(torrent.get("source_hash") or "").casefold()
+            if (
+                torrent.get("source") == "transmission"
+                and torrent_hash not in self.hash_to_id
+                and source_hash in self.hash_to_id
+                and source_hash not in qbit_hashes
+            ):
+                # Migrate IDs assigned by the first combined-list build,
+                # before Transmission keys became client-qualified.
+                self.hash_to_id[torrent_hash] = self.hash_to_id.pop(source_hash)
+                changed = True
             if torrent_hash and torrent_hash not in self.hash_to_id:
                 self.hash_to_id[torrent_hash] = self.next_id
                 self.next_id += 1
@@ -270,6 +300,118 @@ class QBittorrent:
         )
 
 
+class Transmission:
+    """Read structured torrent data from Transmission's local RPC service."""
+
+    FIELDS = (
+        "id",
+        "name",
+        "hashString",
+        "percentDone",
+        "totalSize",
+        "sizeWhenDone",
+        "haveValid",
+        "rateDownload",
+        "rateUpload",
+        "eta",
+        "status",
+    )
+
+    def __init__(self, url: str = TRANSMISSION_URL) -> None:
+        self.url = url
+        self.session_id = ""
+        self.opener = urllib.request.build_opener()
+        self.last_error: str | None = None
+
+    def call(self, method: str, arguments: dict | None = None) -> dict:
+        body = json.dumps(
+            {"method": method, "arguments": arguments or {}},
+            separators=(",", ":"),
+        ).encode()
+        for _ in range(2):
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "Beast DLM",
+            }
+            if self.session_id:
+                headers["X-Transmission-Session-Id"] = self.session_id
+            request = urllib.request.Request(
+                self.url,
+                data=body,
+                headers=headers,
+            )
+            try:
+                with self.opener.open(request, timeout=10) as response:
+                    payload = json.load(response)
+            except urllib.error.HTTPError as error:
+                if error.code != 409:
+                    raise
+                self.session_id = error.headers.get(
+                    "X-Transmission-Session-Id", ""
+                )
+                if not self.session_id:
+                    raise RuntimeError(
+                        "Transmission did not provide an RPC session ID"
+                    ) from error
+                continue
+            if payload.get("result") != "success":
+                raise RuntimeError(
+                    f"Transmission RPC failed: {payload.get('result') or 'unknown error'}"
+                )
+            return dict(payload.get("arguments") or {})
+        raise RuntimeError("Transmission RPC session negotiation failed")
+
+    def torrents(self) -> list[dict]:
+        if not self.url:
+            return []
+        try:
+            result = self.call(
+                "torrent-get",
+                {"fields": list(self.FIELDS)},
+            )
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError) as error:
+            # Transmission is an optional list source. A stopped or absent
+            # daemon must not make the qBittorrent dashboard unusable.
+            self.last_error = str(error)
+            return []
+        self.last_error = None
+        torrents: list[dict] = []
+        for item in result.get("torrents", []):
+            source_hash = str(item.get("hashString") or "").casefold()
+            raw_progress = float(item.get("percentDone") or 0)
+            progress = (
+                max(0.0, min(1.0, raw_progress))
+                if math.isfinite(raw_progress)
+                else 0.0
+            )
+            state = TRANSMISSION_STATES.get(int(item.get("status") or 0), "unknown")
+            if state == "stoppedDL" and progress >= 1:
+                state = "stoppedUP"
+            torrents.append(
+                {
+                    # The client prefix keeps DLM IDs unique if the same
+                    # info-hash happens to exist in both torrent clients.
+                    "hash": f"transmission:{source_hash}",
+                    "source_hash": source_hash,
+                    "name": str(item.get("name") or ""),
+                    "progress": progress,
+                    "size": int(
+                        item.get("sizeWhenDone")
+                        or item.get("totalSize")
+                        or 0
+                    ),
+                    "completed": int(item.get("haveValid") or 0),
+                    "dlspeed": int(item.get("rateDownload") or 0),
+                    "upspeed": int(item.get("rateUpload") or 0),
+                    "eta": int(item.get("eta") or -1),
+                    "state": state,
+                    "source": "transmission",
+                    "source_id": int(item.get("id") or 0),
+                }
+            )
+        return torrents
+
+
 def initial_order(torrent: dict) -> tuple:
     state = str(torrent.get("state") or "")
     speed = int(torrent.get("dlspeed") or 0) + int(torrent.get("upspeed") or 0)
@@ -280,6 +422,18 @@ def initial_order(torrent: dict) -> tuple:
         progress >= 1,
         str(torrent.get("name") or "").casefold(),
     )
+
+
+def torrent_source(torrent: dict) -> str:
+    return (
+        "transmission"
+        if torrent.get("source") == "transmission"
+        else "qbittorrent"
+    )
+
+
+def source_badge(torrent: dict) -> str:
+    return "TR" if torrent_source(torrent) == "transmission" else "QB"
 
 
 def torrent_table(
@@ -304,7 +458,10 @@ def torrent_table(
 
     for index, torrent in enumerate(torrents):
         torrent_id = ids[str(torrent.get("hash") or "").casefold()]
-        name = truncate_name(one_line_name(torrent.get("name")), name_width)
+        name = truncate_name(
+            f"{source_badge(torrent)} {one_line_name(torrent.get('name'))}",
+            name_width,
+        )
         progress = float(torrent.get("progress") or 0)
         down_speed = int(torrent.get("dlspeed") or 0)
         up_speed = int(torrent.get("upspeed") or 0)
@@ -351,8 +508,18 @@ def torrent_table(
     return "\n".join(rows)
 
 
-def filtered_torrents(qbit: QBittorrent, active_only: bool) -> list[dict]:
-    torrents = qbit.torrents()
+def filtered_torrents(
+    qbit: QBittorrent,
+    active_only: bool,
+    transmission: Transmission | None = None,
+) -> list[dict]:
+    torrents = []
+    for torrent in qbit.torrents():
+        item = dict(torrent)
+        item["source"] = "qbittorrent"
+        torrents.append(item)
+    if transmission is not None:
+        torrents.extend(transmission.torrents())
     torrents.sort(key=initial_order)
     if active_only:
         torrents = [
@@ -363,8 +530,13 @@ def filtered_torrents(qbit: QBittorrent, active_only: bool) -> list[dict]:
     return torrents
 
 
-def show_list(qbit: QBittorrent, ids: TorrentIds, active_only: bool) -> None:
-    torrents, id_map = list_torrents(qbit, ids, active_only)
+def show_list(
+    qbit: QBittorrent,
+    transmission: Transmission | None,
+    ids: TorrentIds,
+    active_only: bool,
+) -> None:
+    torrents, id_map = list_torrents(qbit, transmission, ids, active_only)
     print(
         styled(
             f"DLM — {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}",
@@ -376,9 +548,12 @@ def show_list(qbit: QBittorrent, ids: TorrentIds, active_only: bool) -> None:
 
 
 def list_torrents(
-    qbit: QBittorrent, ids: TorrentIds, active_only: bool
+    qbit: QBittorrent,
+    transmission: Transmission | None,
+    ids: TorrentIds,
+    active_only: bool,
 ) -> tuple[list[dict], dict[str, int]]:
-    torrents = filtered_torrents(qbit, active_only)
+    torrents = filtered_torrents(qbit, active_only, transmission)
     id_map = ids.sync(torrents)
     torrents.sort(
         key=lambda torrent: (
@@ -402,6 +577,7 @@ def tui_rows(
         common = {
             "torrent_index": index,
             "id": f"{torrent_id:>{id_width}}",
+            "source": torrent_source(torrent),
             "done": f"{float(torrent.get('progress') or 0) * 100:6.2f}%",
             "total": f"{format_bytes(torrent.get('size') or 0):>10}",
             "down": f"{format_rate(torrent.get('dlspeed') or 0):>10}",
@@ -430,6 +606,8 @@ def tui_attributes() -> dict[str, int]:
         "eta": 0,
         "name": 0,
         "selected": curses.A_BOLD,
+        "qbittorrent": curses.A_BOLD,
+        "transmission": curses.A_BOLD,
         "footer": curses.A_BOLD,
         "error": curses.A_BOLD,
     }
@@ -453,6 +631,8 @@ def tui_attributes() -> dict[str, int]:
         "eta": curses.COLOR_YELLOW,
         "name": curses.COLOR_WHITE,
         "selected": curses.COLOR_YELLOW,
+        "qbittorrent": curses.COLOR_CYAN,
+        "transmission": curses.COLOR_MAGENTA,
         "footer": curses.COLOR_CYAN,
         "error": curses.COLOR_RED,
     }
@@ -505,8 +685,13 @@ def tui_stats(torrents: list[dict]) -> str:
     )
     down = sum(int(item.get("dlspeed") or 0) for item in torrents)
     up = sum(int(item.get("upspeed") or 0) for item in torrents)
+    qbit_count = sum(
+        1 for item in torrents if torrent_source(item) == "qbittorrent"
+    )
+    transmission_count = len(torrents) - qbit_count
     return (
-        f"TORRENTS {len(torrents)}  //  ACTIVE {active}  //  DONE {progress:5.1f}%"
+        f"TORRENTS {len(torrents)} [QB {qbit_count} / TR {transmission_count}]"
+        f"  //  ACTIVE {active}  //  DONE {progress:5.1f}%"
         f"  //  DOWN {format_rate(down)}  //  UP {format_rate(up)}"
     )
 
@@ -720,7 +905,18 @@ def draw_tui(
                 field_width,
             )
             x += field_width + 1
-        name_width = max(0, inner_width - prefix_width)
+        source = str(row["source"])
+        badge = "TR" if source == "transmission" else "QB"
+        tui_addstr(
+            screen,
+            y,
+            x,
+            badge,
+            attributes[source],
+            2,
+        )
+        x += 3
+        name_width = max(0, inner_width - prefix_width - 3)
         full_name = str(row["name"])
         visible_name = (
             marquee_name(full_name, name_width, selected_elapsed)
@@ -997,6 +1193,7 @@ def execute_tui_action(qbit: QBittorrent, torrent: dict, action: str) -> str:
 def _run_tui(
     screen: curses.window,
     qbit: QBittorrent,
+    transmission: Transmission | None,
     ids: TorrentIds,
     active_only: bool,
     interval: float,
@@ -1029,7 +1226,12 @@ def _run_tui(
                     if torrents and selected_index < len(torrents)
                     else ""
                 )
-                all_torrents, id_map = list_torrents(qbit, ids, active_only)
+                all_torrents, id_map = list_torrents(
+                    qbit,
+                    transmission,
+                    ids,
+                    active_only,
+                )
                 torrents = filter_torrents(all_torrents, search_query)
                 if selected_hash:
                     selected_index = next(
@@ -1123,6 +1325,12 @@ def _run_tui(
 
         if key in {curses.KEY_ENTER, 10, 13} and torrents:
             selected = torrents[selected_index]
+            if torrent_source(selected) == "transmission":
+                notice = (
+                    "TRANSMISSION // LIST ONLY // USE transmission-remote TO CONTROL"
+                )
+                notice_until = time.monotonic() + 4
+                continue
             torrent_id = id_map[str(selected.get("hash") or "").casefold()]
             action = choose_torrent_action(
                 screen, selected, torrent_id, attributes
@@ -1140,6 +1348,7 @@ def _run_tui(
 def run_tui(
     screen: curses.window,
     qbit: QBittorrent,
+    transmission: Transmission | None,
     ids: TorrentIds,
     active_only: bool,
     interval: float,
@@ -1150,7 +1359,7 @@ def run_tui(
     except curses.error:
         pass
     try:
-        _run_tui(screen, qbit, ids, active_only, interval)
+        _run_tui(screen, qbit, transmission, ids, active_only, interval)
     finally:
         try:
             curses.mousemask(0)
@@ -1158,24 +1367,36 @@ def run_tui(
             pass
 
 
-def command_list(qbit: QBittorrent, ids: TorrentIds, args: argparse.Namespace) -> None:
+def command_list(
+    qbit: QBittorrent,
+    transmission: Transmission | None,
+    ids: TorrentIds,
+    args: argparse.Namespace,
+) -> None:
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     if interactive and not args.plain:
         interval = max(0.5, args.watch if args.watch is not None else 2.0)
         try:
-            curses.wrapper(run_tui, qbit, ids, args.active, interval)
+            curses.wrapper(
+                run_tui,
+                qbit,
+                transmission,
+                ids,
+                args.active,
+                interval,
+            )
         except KeyboardInterrupt:
             pass
         return
     if args.watch is None:
-        show_list(qbit, ids, args.active)
+        show_list(qbit, transmission, ids, args.active)
         return
     interval = max(0.5, args.watch)
     try:
         while True:
             print("\033[2J\033[H", end="")
             try:
-                show_list(qbit, ids, args.active)
+                show_list(qbit, transmission, ids, args.active)
             except Exception as error:
                 print(f"Unable to read qBittorrent: {error}", file=sys.stderr)
             print(f"\nRefreshing every {interval:g}s — Ctrl+C to exit")
@@ -1299,9 +1520,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         qbit = QBittorrent()
         qbit.login()
+        transmission = Transmission() if TRANSMISSION_URL else None
         ids = TorrentIds()
         if args.command == "list":
-            command_list(qbit, ids, args)
+            command_list(qbit, transmission, ids, args)
         elif args.command == "stop":
             command_stop(qbit)
         elif args.command == "start":

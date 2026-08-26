@@ -1,16 +1,16 @@
 # DLM
 
 DLM is a dependency-free, full-screen terminal client for managing a
-qBittorrent download queue. It provides readable live progress, persistent
-numeric torrent IDs, confirmed destructive removal, and opinionated
-one-download-at-a-time queue controls.
+qBittorrent download queue and viewing torrents from Transmission. It provides
+readable live progress, persistent numeric torrent IDs, confirmed destructive
+qBittorrent removal, and opinionated one-download-at-a-time queue controls.
 
 ```text
    #    DONE      TOTAL       DOWN         UP      ETA NAME
 ------------------------------------------------------------------------
->  1   4.21%    5.86GiB   585KiB/s       0B/s    2h40m Example release
+>  1   4.21%    5.86GiB   585KiB/s       0B/s    2h40m QB Example release
 
-   2  18.34%    4.68GiB       0B/s       0B/s       -- Stalled release…
+   2  18.34%    4.68GiB       0B/s       0B/s       -- TR Legacy release…
 ------------------------------------------------------------------------
      9.89%   10.54GiB   585KiB/s       0B/s       -- TOTAL (2)
 ```
@@ -18,6 +18,8 @@ one-download-at-a-time queue controls.
 ## Features
 
 - concise `DONE`, `TOTAL`, `DOWN`, `UP`, `ETA`, and `NAME` display;
+- one combined list for qBittorrent and Transmission, identified by fixed
+  cyan `QB` and magenta `TR` badges;
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
 - high-contrast torrent numbers and a yellow `>` selection marker;
@@ -38,6 +40,7 @@ one-download-at-a-time queue controls.
 
 - Python 3.10 or newer;
 - qBittorrent with its Web UI enabled;
+- optionally, a local or network-accessible Transmission RPC service;
 - a credentials file containing:
 
 ```ini
@@ -75,6 +78,7 @@ DLM reads these optional environment variables:
 | Variable | Default on Beast | Purpose |
 | --- | --- | --- |
 | `DLM_QBITTORRENT_URL` | `http://192.168.1.27:8080` | qBittorrent Web UI base URL |
+| `DLM_TRANSMISSION_URL` | `http://127.0.0.1:9091/transmission/rpc` | Transmission RPC URL; set to an empty value to disable |
 | `DLM_CREDENTIALS_FILE` | `/media/nicolas/beast22/appdata/media-stack/qbittorrent.credentials` | Credentials file |
 | `DLM_STATE_FILE` | `~/.local/state/dlm/torrents.json` | Persistent numeric-ID state |
 
@@ -97,6 +101,11 @@ dlm
 dlm list
 ```
 
+The dashboard merges qBittorrent and Transmission torrents into one numbered
+list. A fixed `QB` or `TR` badge identifies the source, and the header reports
+both source totals. Transmission is optional: if its daemon is unavailable,
+the qBittorrent dashboard continues to work.
+
 The first torrent is selected automatically with a yellow `>` marker and
 high-contrast number/name instead of a reverse-video white bar. If its name is
 too long, the name scrolls horizontally after a short pause; every other long
@@ -113,13 +122,17 @@ Press `s` to search torrent names. Every space-separated search word must
 appear in the name. Press Enter to apply the search. Esc cancels search entry;
 once a search is active, Esc clears it and restores the full list.
 
-Press Enter on the selected torrent to open its action menu:
+Press Enter on a selected `QB` torrent to open its action menu:
 
 - `START / RESUME` starts the selected torrent under DLM's single-download
   queue settings;
 - `PAUSE / STOP` stops the selected torrent;
 - `DELETE + DATA` removes the torrent and its downloaded files after a second
   confirmation dialog.
+
+`TR` entries are list-only. Pressing Enter on one displays a notice and never
+routes the torrent to a qBittorrent action. Use `transmission-remote` when a
+Transmission torrent needs to be changed.
 
 Use the arrow keys and Enter inside a menu. Esc is the consistent cancel/clear
 key for search, action menus, and delete confirmation. Press `q` to close DLM.

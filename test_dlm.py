@@ -7,14 +7,17 @@ from unittest.mock import Mock
 from dlm import (
     QBittorrent,
     TUI_ACTIONS,
+    Transmission,
     TorrentIds,
     command_remove,
     ensure_selected_visible,
     execute_tui_action,
     filter_torrents,
+    filtered_torrents,
     marquee_name,
     navigation_selection,
     parse_arguments,
+    source_badge,
     torrent_table,
     truncate_name,
     tui_rows,
@@ -34,6 +37,25 @@ class DlmTests(unittest.TestCase):
             second = reloaded.sync([{"hash": "BBB"}, {"hash": "CCC"}])
             self.assertEqual(second["bbb"], 2)
             self.assertEqual(second["ccc"], 3)
+
+    def test_existing_transmission_ids_migrate_to_source_qualified_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            ids = TorrentIds(path)
+            ids.sync([{"hash": "ABC", "source": "transmission"}])
+
+            mapping = ids.sync(
+                [
+                    {
+                        "hash": "transmission:abc",
+                        "source_hash": "abc",
+                        "source": "transmission",
+                    }
+                ]
+            )
+
+            self.assertNotIn("abc", mapping)
+            self.assertEqual(mapping["transmission:abc"], 1)
 
     def test_table_has_numbers_and_truncates_names_to_one_line(self):
         name = "A long torrent name which must remain on exactly one row"
@@ -196,9 +218,70 @@ class DlmTests(unittest.TestCase):
             ]
         )
         self.assertIn("TORRENTS 1", stats)
+        self.assertIn("QB 1 / TR 0", stats)
         self.assertIn("ACTIVE 1", stats)
         self.assertIn("DONE  50.0%", stats)
         self.assertIn("DOWN 1KiB/s", stats)
+
+    def test_transmission_torrents_are_normalized_for_the_shared_list(self):
+        transmission = Transmission("http://transmission.invalid/rpc")
+        transmission.call = Mock(
+            return_value={
+                "torrents": [
+                    {
+                        "id": 7,
+                        "name": "Legacy download",
+                        "hashString": "ABCDEF",
+                        "percentDone": 0.25,
+                        "sizeWhenDone": 2_000,
+                        "totalSize": 1_000,
+                        "haveValid": 500,
+                        "rateDownload": 120,
+                        "rateUpload": 30,
+                        "eta": 60,
+                        "status": 4,
+                    }
+                ]
+            }
+        )
+
+        torrents = transmission.torrents()
+
+        self.assertEqual(len(torrents), 1)
+        self.assertEqual(torrents[0]["hash"], "transmission:abcdef")
+        self.assertEqual(torrents[0]["source_hash"], "abcdef")
+        self.assertEqual(torrents[0]["source"], "transmission")
+        self.assertEqual(torrents[0]["source_id"], 7)
+        self.assertEqual(torrents[0]["progress"], 0.25)
+        self.assertEqual(torrents[0]["size"], 2_000)
+        self.assertEqual(torrents[0]["state"], "downloading")
+
+    def test_transmission_is_optional_when_its_daemon_is_offline(self):
+        transmission = Transmission("http://transmission.invalid/rpc")
+        transmission.call = Mock(side_effect=OSError("offline"))
+
+        self.assertEqual(transmission.torrents(), [])
+        self.assertEqual(transmission.last_error, "offline")
+
+    def test_qbittorrent_and_transmission_are_merged_and_badged(self):
+        qbit = Mock()
+        qbit.torrents.return_value = [
+            {"hash": "q", "name": "Qbit job", "state": "stoppedDL"}
+        ]
+        transmission = Mock()
+        transmission.torrents.return_value = [
+            {
+                "hash": "t",
+                "name": "Transmission job",
+                "source": "transmission",
+                "state": "stoppedDL",
+            }
+        ]
+
+        torrents = filtered_torrents(qbit, False, transmission)
+
+        self.assertEqual(len(torrents), 2)
+        self.assertEqual({source_badge(item) for item in torrents}, {"QB", "TR"})
 
     def test_search_requires_every_term_in_the_torrent_name(self):
         torrents = [
