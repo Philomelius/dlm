@@ -1,4 +1,5 @@
 import curses
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -23,14 +24,18 @@ from dlm import (
     navigation_selection,
     next_sort_order,
     parse_arguments,
+    parse_active_limit,
+    parse_download_limit,
     pending_key,
     source_badge,
     sort_header_label,
     sort_torrents,
+    stats_control_key,
     torrent_table,
     truncate_name,
     tui_rows,
     tui_stats,
+    tui_stats_line,
 )
 
 
@@ -231,6 +236,30 @@ class DlmTests(unittest.TestCase):
         self.assertIn("ACTIVE 1", stats)
         self.assertIn("DONE  50.0%", stats)
         self.assertIn("DOWN 1KiB/s", stats)
+
+    def test_status_line_clicks_target_active_and_down_controls(self):
+        stats = tui_stats_line([], "active documentary", 93)
+        inner_x = 2
+        active_x = inner_x + stats.rfind("ACTIVE ")
+        down_x = inner_x + stats.rfind("DOWN ")
+
+        self.assertEqual(stats_control_key(active_x, inner_x, stats), "active")
+        self.assertEqual(stats_control_key(down_x, inner_x, stats), "down")
+        self.assertIsNone(stats_control_key(inner_x, inner_x, stats))
+
+    def test_setting_values_are_validated_and_speed_uses_kibibytes(self):
+        self.assertEqual(parse_active_limit("3"), 3)
+        with self.assertRaises(ValueError):
+            parse_active_limit("0")
+        with self.assertRaises(ValueError):
+            parse_active_limit("2.5")
+
+        self.assertEqual(parse_download_limit("-1"), 0)
+        self.assertEqual(parse_download_limit("500"), 500 * 1024)
+        self.assertEqual(parse_download_limit("1.5M"), round(1.5 * 1024**2))
+        self.assertEqual(parse_download_limit("2GiB/s"), 2 * 1024**3)
+        with self.assertRaises(ValueError):
+            parse_download_limit("0")
 
     def test_transmission_torrents_are_normalized_for_the_shared_list(self):
         transmission = Transmission("http://transmission.invalid/rpc")
@@ -531,6 +560,34 @@ class DlmTests(unittest.TestCase):
             hashes="hash",
             deleteFiles="true",
         )
+
+    def test_clickable_limits_use_qbittorrent_preferences_and_transfer_api(self):
+        qbit = QBittorrent.__new__(QBittorrent)
+        qbit.post = Mock()
+
+        qbit.set_max_active_downloads(4)
+        path, fields = qbit.post.call_args.args[0], qbit.post.call_args.kwargs
+        preferences = json.loads(fields["json"])
+        self.assertEqual(path, "/api/v2/app/setPreferences")
+        self.assertEqual(preferences["max_active_downloads"], 4)
+        self.assertEqual(preferences["max_active_torrents"], -1)
+        self.assertTrue(preferences["dont_count_slow_torrents"])
+
+        qbit.post.reset_mock()
+        qbit.set_download_limit(0)
+        qbit.post.assert_called_once_with(
+            "/api/v2/transfer/setDownloadLimit",
+            limit="0",
+        )
+
+    def test_resuming_queue_does_not_reset_user_active_limit(self):
+        qbit = QBittorrent.__new__(QBittorrent)
+        qbit.post = Mock()
+        qbit.configure_queue()
+
+        fields = qbit.post.call_args.kwargs
+        preferences = json.loads(fields["json"])
+        self.assertNotIn("max_active_downloads", preferences)
 
     def test_remove_command_deletes_selected_torrent_and_files(self):
         qbit = Mock()

@@ -3,7 +3,7 @@
 DLM is a dependency-free, full-screen terminal client for managing a
 qBittorrent download queue and viewing torrents from Transmission. It provides
 readable live progress, persistent numeric torrent IDs, confirmed destructive
-qBittorrent removal, and opinionated one-download-at-a-time queue controls.
+qBittorrent removal, and configurable non-stalled download queue controls.
 
 ```text
    #    DONE      TOTAL       DOWN         UP      ETA NAME
@@ -24,6 +24,8 @@ qBittorrent removal, and opinionated one-download-at-a-time queue controls.
 - color-coded columns and spacing between torrent entries;
 - high-contrast torrent numbers and a yellow `>` selection marker;
 - clickable `DONE`, `DOWN`, `UP`, `ETA`, and `NAME` sorting headers;
+- clickable `ACTIVE` and top-line `DOWN` controls for changing qBittorrent's
+  active-download count and global download-speed limit;
 - keyboard-only scrolling; mouse-wheel events are ignored;
 - name search with live filtering;
 - an Enter-key action menu for starting, pausing/stopping, or deleting the
@@ -118,8 +120,14 @@ Mouse-wheel events are ignored, so scrolling is keyboard-only.
 Click `DONE`, `DOWN`, `UP`, `ETA`, or `NAME` to reorder the visible torrents.
 The first click sorts high-to-low (`Z` to `A` for names); another click on the
 same heading reverses the order. A `▼` or `▲` beside the active heading shows
-the current direction. Unknown ETAs always remain below known ETAs. Header
-clicks are the only mouse interaction—mouse-wheel scrolling remains disabled.
+the current direction. Unknown ETAs always remain below known ETAs.
+
+The top status line also has two controls. Click `ACTIVE` to set qBittorrent's
+maximum number of simultaneous downloads; stalled torrents remain excluded
+from that limit. Click the top-line `DOWN` value to set the global download
+speed. Plain numbers are interpreted as KiB/s, `K`, `M`, and `G` suffixes are
+accepted, and `-1` removes the speed limit. Esc cancels either prompt.
+Mouse-wheel scrolling remains disabled.
 
 - Page Up/Page Down move by one visible page;
 - Home or `g` selects the first torrent;
@@ -135,8 +143,8 @@ once a search is active, Esc clears it and restores the full list.
 
 Press Enter on a selected `QB` torrent to open its action menu:
 
-- `START / RESUME` starts the selected torrent under DLM's single-download
-  queue settings;
+- `START / RESUME` starts the selected torrent under DLM's configured active-
+  download limit;
 - `PAUSE / STOP` stops the selected torrent;
 - `DELETE + DATA` removes the torrent and its downloaded files after a second
   confirmation dialog.

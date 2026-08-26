@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import time
@@ -109,6 +110,54 @@ def format_bytes(value: int | float) -> str:
 
 def format_rate(value: int | float) -> str:
     return f"{format_bytes(value)}/s" if value else "0B/s"
+
+
+def parse_active_limit(value: str) -> int:
+    """Parse a positive qBittorrent active-download limit."""
+    text = value.strip()
+    if not re.fullmatch(r"\d+", text):
+        raise ValueError("active limit must be a whole number")
+    maximum = int(text)
+    if maximum < 1:
+        raise ValueError("active limit must be at least 1")
+    return maximum
+
+
+def parse_download_limit(value: str) -> int:
+    """Parse a speed limit into bytes/s; -1 is the unlimited UI sentinel."""
+    text = value.strip().casefold().replace(" ", "")
+    if text == "-1":
+        return 0
+    match = re.fullmatch(
+        r"(\d+(?:\.\d+)?)(k|kb|kib|m|mb|mib|g|gb|gib)?(?:/s)?",
+        text,
+    )
+    if not match:
+        raise ValueError("use KiB/s, or suffix the value with K, M, or G")
+    amount = float(match.group(1))
+    if amount <= 0:
+        raise ValueError("download limit must be positive, or -1 for unlimited")
+    unit = match.group(2) or "kib"
+    multipliers = {
+        "k": 1024,
+        "kb": 1024,
+        "kib": 1024,
+        "m": 1024**2,
+        "mb": 1024**2,
+        "mib": 1024**2,
+        "g": 1024**3,
+        "gb": 1024**3,
+        "gib": 1024**3,
+    }
+    return max(1, round(amount * multipliers[unit]))
+
+
+def download_limit_input(bytes_per_second: int) -> str:
+    """Represent qBittorrent's zero/unlimited value in the DLM prompt."""
+    if bytes_per_second <= 0:
+        return "-1"
+    kibibytes = bytes_per_second / 1024
+    return f"{kibibytes:g}"
 
 
 def format_eta(value: int | float | None) -> str:
@@ -279,6 +328,12 @@ class QBittorrent:
         with self.opener.open(f"{BASE_URL}/api/v2/torrents/info", timeout=15) as response:
             return json.load(response)
 
+    def preferences(self) -> dict:
+        with self.opener.open(
+            f"{BASE_URL}/api/v2/app/preferences", timeout=15
+        ) as response:
+            return json.load(response)
+
     def _versioned_action(self, current: str, legacy: str, hashes: str) -> None:
         try:
             self.post(f"/api/v2/torrents/{current}", hashes=hashes)
@@ -294,9 +349,41 @@ class QBittorrent:
         self._versioned_action("start", "resume", hashes)
 
     def configure_queue(self) -> None:
+        preferences = dict(QUEUE_PREFERENCES)
+        # The user-adjustable limit is persisted by qBittorrent. Do not reset
+        # it whenever DLM resumes the queue.
+        preferences.pop("max_active_downloads", None)
         self.post(
             "/api/v2/app/setPreferences",
-            json=json.dumps(QUEUE_PREFERENCES, separators=(",", ":")),
+            json=json.dumps(preferences, separators=(",", ":")),
+        )
+
+    def set_max_active_downloads(self, maximum: int) -> None:
+        self.post(
+            "/api/v2/app/setPreferences",
+            json=json.dumps(
+                {
+                    "queueing_enabled": True,
+                    "max_active_downloads": maximum,
+                    # Keep this unlimited so stalled torrents do not occupy
+                    # the user-selected active-download slots.
+                    "max_active_torrents": -1,
+                    "dont_count_slow_torrents": True,
+                },
+                separators=(",", ":"),
+            ),
+        )
+
+    def download_limit(self) -> int:
+        with self.opener.open(
+            f"{BASE_URL}/api/v2/transfer/downloadLimit", timeout=15
+        ) as response:
+            return int(response.read().decode().strip())
+
+    def set_download_limit(self, bytes_per_second: int) -> None:
+        self.post(
+            "/api/v2/transfer/setDownloadLimit",
+            limit=str(max(0, bytes_per_second)),
         )
 
     def remove_with_files(self, torrent_hash: str) -> None:
@@ -703,6 +790,33 @@ def tui_stats(torrents: list[dict]) -> str:
     )
 
 
+def tui_stats_line(
+    torrents: list[dict], search_query: str, total_torrents: int
+) -> str:
+    stats = tui_stats(torrents)
+    if not search_query:
+        return stats
+    return (
+        f'SEARCH "{search_query}"  //  MATCHES {len(torrents)}/{total_torrents}'
+        f"  //  {stats}"
+    )
+
+
+def stats_control_key(mouse_x: int, inner_x: int, stats: str) -> str | None:
+    """Map clicks on the visible ACTIVE and DOWN status fields."""
+    relative_x = mouse_x - inner_x
+    for key, label in (("active", "ACTIVE "), ("down", "DOWN ")):
+        start = stats.rfind(label)
+        if start < 0:
+            continue
+        end = stats.find("  //", start)
+        if end < 0:
+            end = len(stats)
+        if start <= relative_x < end:
+            return key
+    return None
+
+
 def filter_torrents(torrents: list[dict], query: str) -> list[dict]:
     terms = query.casefold().split()
     if not terms:
@@ -1031,12 +1145,7 @@ def draw_tui(
         attributes["title"],
         len(timestamp),
     )
-    stats = tui_stats(torrents)
-    if search_query:
-        stats = (
-            f'SEARCH "{search_query}"  //  MATCHES {len(torrents)}/{total_torrents}'
-            f"  //  {stats}"
-        )
+    stats = tui_stats_line(torrents, search_query, total_torrents)
     tui_addstr(
         screen,
         2,
@@ -1250,9 +1359,16 @@ def search_prompt(
     screen: curses.window,
     attributes: dict[str, int],
     initial_query: str = "",
+    *,
+    title: str = "SEARCH TORRENTS",
+    description: str = "All words must appear in the torrent name.",
+    replace_on_type: bool = False,
 ) -> str | None:
     height, width = screen.getmaxyx()
-    prompt_width = min(width - 4, max(50, len(initial_query) + 10))
+    prompt_width = min(
+        width - 4,
+        max(50, len(initial_query) + 10, len(title) + 6, len(description) + 6),
+    )
     prompt_height = 7
     if prompt_width < 20 or prompt_height > height - 2:
         return None
@@ -1262,6 +1378,7 @@ def search_prompt(
     prompt.keypad(True)
     prompt.timeout(-1)
     query = initial_query
+    replace_pending = replace_on_type
     try:
         curses.curs_set(1)
     except curses.error:
@@ -1280,7 +1397,7 @@ def search_prompt(
                 prompt,
                 1,
                 2,
-                "SEARCH TORRENTS",
+                title,
                 attributes["title"],
                 prompt_width - 4,
             )
@@ -1288,7 +1405,7 @@ def search_prompt(
                 prompt,
                 2,
                 2,
-                "All words must appear in the torrent name.",
+                description,
                 attributes["name"],
                 prompt_width - 4,
             )
@@ -1321,13 +1438,17 @@ def search_prompt(
             if key in {curses.KEY_ENTER, 10, 13}:
                 return query.strip()
             if key in {curses.KEY_BACKSPACE, 8, 127}:
-                query = query[:-1]
+                query = "" if replace_pending else query[:-1]
+                replace_pending = False
             elif key == curses.KEY_MOUSE:
                 try:
                     curses.getmouse()
                 except curses.error:
                     pass
             elif 32 <= key <= 126:
+                if replace_pending:
+                    query = ""
+                    replace_pending = False
                 query += chr(key)
             elif key == curses.KEY_RESIZE:
                 return None
@@ -1338,6 +1459,23 @@ def search_prompt(
             pass
         del prompt
         screen.touchwin()
+
+
+def setting_prompt(
+    screen: curses.window,
+    attributes: dict[str, int],
+    title: str,
+    description: str,
+    initial_value: str,
+) -> str | None:
+    return search_prompt(
+        screen,
+        attributes,
+        initial_value,
+        title=title,
+        description=description,
+        replace_on_type=True,
+    )
 
 
 def choose_torrent_action(
@@ -1494,8 +1632,71 @@ def _run_tui(
                 _, mouse_x, mouse_y, _, button_state = curses.getmouse()
             except curses.error:
                 continue
-            if mouse_y != 4 or not is_primary_click(button_state):
-                # Wheel events and clicks outside the sortable header remain
+            if not is_primary_click(button_state):
+                # Mouse-wheel scrolling and non-primary buttons remain inert.
+                continue
+            if mouse_y == 2:
+                stats_key = stats_control_key(
+                    mouse_x,
+                    2,
+                    tui_stats_line(torrents, search_query, len(all_torrents)),
+                )
+                if stats_key is None:
+                    continue
+                try:
+                    if stats_key == "active":
+                        current_maximum = int(
+                            qbit.preferences().get("max_active_downloads") or 1
+                        )
+                        entered = setting_prompt(
+                            screen,
+                            attributes,
+                            "MAXIMUM ACTIVE DOWNLOADS",
+                            "qBittorrent slots; stalled torrents stay excluded.",
+                            str(max(1, current_maximum)),
+                        )
+                        if entered is None:
+                            next_refresh = max(
+                                next_refresh, time.monotonic() + 0.25
+                            )
+                            continue
+                        maximum = parse_active_limit(entered)
+                        qbit.set_max_active_downloads(maximum)
+                        notice = f"ACTIVE DOWNLOAD LIMIT // {maximum}"
+                    else:
+                        entered = setting_prompt(
+                            screen,
+                            attributes,
+                            "MAXIMUM DOWNLOAD SPEED",
+                            "Plain values use KiB/s; K/M/G accepted; -1 is unlimited.",
+                            download_limit_input(qbit.download_limit()),
+                        )
+                        if entered is None:
+                            next_refresh = max(
+                                next_refresh, time.monotonic() + 0.25
+                            )
+                            continue
+                        bytes_per_second = parse_download_limit(entered)
+                        qbit.set_download_limit(bytes_per_second)
+                        limit_label = (
+                            "UNLIMITED"
+                            if bytes_per_second == 0
+                            else format_rate(bytes_per_second)
+                        )
+                        notice = f"DOWNLOAD LIMIT // {limit_label}"
+                    notice_until = time.monotonic() + 4
+                    next_refresh = 0.0
+                except ValueError as setting_error:
+                    notice = f"INVALID SETTING // {setting_error}"
+                    notice_until = time.monotonic() + 4
+                    next_refresh = max(next_refresh, time.monotonic() + 0.25)
+                except Exception as setting_error:
+                    notice = f"ERROR // {setting_error}"
+                    notice_until = time.monotonic() + 4
+                    next_refresh = max(next_refresh, time.monotonic() + 0.25)
+                continue
+            if mouse_y != 4:
+                # Clicks outside the status controls and sortable header are
                 # intentionally inert.
                 continue
             id_width = max(
