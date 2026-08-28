@@ -214,9 +214,10 @@ SSH:
 | Shift+Cursor Down | Send Text | `ESC [ 1 ; 2 B` |
 
 Enter each sequence as a literal Escape character followed by the remaining
-characters (press Esc in the value field, then type `[1;2A` or `[1;2B`). Open a
-new Terminal window after saving. DLM accepts these standard xterm sequences,
-including when they are split during an SSH connection.
+characters (press Esc in the value field, then type `[1;2A` or `[1;2B`). Quit
+Terminal completely with Command+Q and reopen it after saving; another window
+in the already-running Terminal process may keep the old mapping. DLM accepts
+these standard xterm sequences, including when they are split during SSH.
 
 Choose another refresh interval:
 
