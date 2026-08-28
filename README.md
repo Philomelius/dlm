@@ -6,13 +6,13 @@ progress, persistent numeric torrent IDs, confirmed destructive removal, and
 configurable non-stalled qBittorrent queue controls.
 
 ```text
-   #    DONE      TOTAL       DOWN         UP      ETA NAME
+   #    DONE      TOTAL       DOWN         UP      ETA   SEEDS NAME
 ------------------------------------------------------------------------
->  1   4.21%    5.86GiB   585KiB/s       0B/s    2h40m QB Example release
+>  1   4.21%    5.86GiB   585KiB/s       0B/s    2h40m      18 QB Example release
 
-   2  18.34%    4.68GiB       0B/s       0B/s       -- TR Legacy release…
+   2  18.34%    4.68GiB       0B/s       0B/s       --       4 TR Legacy release…
 ------------------------------------------------------------------------
-     9.89%   10.54GiB   585KiB/s       0B/s       -- TOTAL (2)
+     9.89%   10.54GiB   585KiB/s       0B/s       --         TOTAL (2)
 ```
 
 ## Interface
@@ -29,13 +29,14 @@ qBittorrent torrents.
 
 ## Features
 
-- concise `DONE`, `TOTAL`, `DOWN`, `UP`, `ETA`, and `NAME` display;
+- concise `DONE`, `TOTAL`, `DOWN`, `UP`, `ETA`, `SEEDS`, and `NAME` display;
 - one combined list for qBittorrent and Transmission, identified by fixed
   cyan `QB` and magenta `TR` badges;
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
 - high-contrast torrent numbers and a yellow `>` selection marker;
-- clickable `#`, `DONE`, `DOWN`, `UP`, `ETA`, and `NAME` sorting headers;
+- clickable `#`, `DONE`, `DOWN`, `UP`, `ETA`, `SEEDS`, and `NAME` sorting
+  headers;
 - clickable `ACTIVE` and top-line `DOWN` controls for changing qBittorrent's
   active-download count and global download-speed limit;
 - keyboard-only scrolling; mouse-wheel events are ignored;
@@ -135,11 +136,14 @@ Selecting another torrent stops name scrolling automatically. Use Up/Down or
 first and last torrent. Mouse-wheel events are ignored, so scrolling is
 keyboard-only.
 
-Click `#`, `DONE`, `DOWN`, `UP`, `ETA`, or `NAME` to reorder the visible
-torrents. `#` sorts by DLM's persistent torrent number across both clients.
-The first click sorts high-to-low (`Z` to `A` for names); another click on the
-same heading reverses the order. A `▼` or `▲` beside the active heading shows
-the current direction. Unknown ETAs always remain below known ETAs.
+Click `#`, `DONE`, `DOWN`, `UP`, `ETA`, `SEEDS`, or `NAME` to reorder the
+visible torrents. `#` sorts by DLM's persistent torrent number across both
+clients. `SEEDS` is the highest known swarm seeder count reported by
+qBittorrent or Transmission's trackers, with connected sending peers used as a
+Transmission fallback. The first click sorts high-to-low (`Z` to `A` for
+names); another click on the same heading reverses the order. A `▼` or `▲`
+beside the active heading shows the current direction. Unknown ETAs always
+remain below known ETAs.
 
 The top status line also has two controls. Click `ACTIVE` to set qBittorrent's
 maximum number of simultaneous downloads; stalled torrents remain excluded

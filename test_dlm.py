@@ -21,6 +21,7 @@ from dlm import (
     filter_torrents,
     filtered_torrents,
     header_sort_key,
+    known_seed_count,
     marquee_name,
     navigation_selection,
     next_sort_order,
@@ -90,6 +91,7 @@ class DlmTests(unittest.TestCase):
             terminal_width=76,
         )
         self.assertIn("#", table)
+        self.assertIn("SEEDS", table.splitlines()[0])
         self.assertIn("12.50%", table)
         self.assertNotIn("HASH", table)
         self.assertIn("…", table)
@@ -143,6 +145,7 @@ class DlmTests(unittest.TestCase):
                 "name": "Cape.Fear.S01E10.The.Executioners.2160p." * 3,
                 "progress": 0.25,
                 "size": 1024,
+                "seeds": 13,
             },
             {"hash": "b", "name": "Second", "progress": 0, "size": 0},
         ]
@@ -152,7 +155,12 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(rows[0]["torrent_index"], 0)
         self.assertEqual(rows[2]["torrent_index"], 1)
         self.assertEqual(rows[0]["name"], torrents[0]["name"])
-        self.assertEqual(prefix_width, 55)
+        self.assertEqual(rows[0]["seeds"], "     13")
+        self.assertEqual(prefix_width, 63)
+
+    def test_seed_counts_ignore_unknown_values_and_use_the_highest_report(self):
+        self.assertEqual(known_seed_count(-1, None, "8", 3), 8)
+        self.assertEqual(known_seed_count(-1, None), 0)
 
     def test_names_are_truncated_and_opt_in_marquee_moves_to_the_right(self):
         name = "ABCDEFGHIJ"
@@ -342,6 +350,12 @@ class DlmTests(unittest.TestCase):
                         "rateUpload": 30,
                         "eta": 60,
                         "status": 4,
+                        "peersSendingToUs": 3,
+                        "trackerStats": [
+                            {"seederCount": 12},
+                            {"seederCount": 27},
+                            {"seederCount": -1},
+                        ],
                     }
                 ]
             }
@@ -356,6 +370,7 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(torrents[0]["source_id"], 7)
         self.assertEqual(torrents[0]["progress"], 0.25)
         self.assertEqual(torrents[0]["size"], 2_000)
+        self.assertEqual(torrents[0]["seeds"], 27)
         self.assertEqual(torrents[0]["state"], "downloading")
 
     def test_transmission_is_optional_when_its_daemon_is_offline(self):
@@ -368,7 +383,13 @@ class DlmTests(unittest.TestCase):
     def test_qbittorrent_and_transmission_are_merged_and_badged(self):
         qbit = Mock()
         qbit.torrents.return_value = [
-            {"hash": "q", "name": "Qbit job", "state": "stoppedDL"}
+            {
+                "hash": "q",
+                "name": "Qbit job",
+                "state": "stoppedDL",
+                "num_complete": 18,
+                "num_seeds": 2,
+            }
         ]
         transmission = Mock()
         transmission.torrents.return_value = [
@@ -384,6 +405,10 @@ class DlmTests(unittest.TestCase):
 
         self.assertEqual(len(torrents), 2)
         self.assertEqual({source_badge(item) for item in torrents}, {"QB", "TR"})
+        qbit_torrent = next(
+            item for item in torrents if item["source"] == "qbittorrent"
+        )
+        self.assertEqual(qbit_torrent["seeds"], 18)
 
     def test_search_requires_every_term_in_the_torrent_name(self):
         torrents = [
@@ -413,7 +438,8 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(header_sort_key(26, 2, 2), "down")
         self.assertEqual(header_sort_key(37, 2, 2), "up")
         self.assertEqual(header_sort_key(48, 2, 2), "eta")
-        self.assertEqual(header_sort_key(57, 2, 2), "name")
+        self.assertEqual(header_sort_key(57, 2, 2), "seeds")
+        self.assertEqual(header_sort_key(65, 2, 2), "name")
 
     def test_torrents_sort_in_both_directions_for_every_header(self):
         torrents = [
@@ -424,6 +450,7 @@ class DlmTests(unittest.TestCase):
                 "dlspeed": 30,
                 "upspeed": 2,
                 "eta": 30,
+                "seeds": 9,
             },
             {
                 "hash": "c",
@@ -432,6 +459,7 @@ class DlmTests(unittest.TestCase):
                 "dlspeed": 10,
                 "upspeed": 3,
                 "eta": -1,
+                "seeds": 17,
             },
             {
                 "hash": "b",
@@ -440,6 +468,7 @@ class DlmTests(unittest.TestCase):
                 "dlspeed": 20,
                 "upspeed": 1,
                 "eta": 10,
+                "seeds": 2,
             },
         ]
         ids = {"a": 12, "b": 42, "c": 3}
@@ -467,6 +496,14 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(
             [item["name"] for item in sort_torrents(torrents, "up", True)],
             ["Charlie", "Alpha", "Bravo"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "seeds", True)],
+            ["Charlie", "Alpha", "Bravo"],
+        )
+        self.assertEqual(
+            [item["name"] for item in sort_torrents(torrents, "seeds", False)],
+            ["Bravo", "Alpha", "Charlie"],
         )
         self.assertEqual(
             [item["name"] for item in sort_torrents(torrents, "eta", True)],

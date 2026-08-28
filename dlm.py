@@ -237,6 +237,19 @@ def visible_torrent_name(
     return truncate_name(name, width)
 
 
+def known_seed_count(*values: object) -> int:
+    """Return the highest non-negative seed count reported by a client."""
+    counts: list[int] = []
+    for value in values:
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count >= 0:
+            counts.append(count)
+    return max(counts, default=0)
+
+
 class TorrentIds:
     """Persistent integer IDs so users never need to handle torrent hashes."""
 
@@ -433,6 +446,8 @@ class Transmission:
         "rateUpload",
         "eta",
         "status",
+        "peersSendingToUs",
+        "trackerStats",
     )
 
     def __init__(self, url: str = TRANSMISSION_URL) -> None:
@@ -517,6 +532,11 @@ class Transmission:
             state = TRANSMISSION_STATES.get(int(item.get("status") or 0), "unknown")
             if state == "stoppedDL" and progress >= 1:
                 state = "stoppedUP"
+            tracker_seeds = [
+                tracker.get("seederCount")
+                for tracker in item.get("trackerStats") or []
+                if isinstance(tracker, dict)
+            ]
             torrents.append(
                 {
                     # The client prefix keeps DLM IDs unique if the same
@@ -534,6 +554,10 @@ class Transmission:
                     "dlspeed": int(item.get("rateDownload") or 0),
                     "upspeed": int(item.get("rateUpload") or 0),
                     "eta": int(item.get("eta") or -1),
+                    "seeds": known_seed_count(
+                        item.get("peersSendingToUs"),
+                        *tracker_seeds,
+                    ),
                     "state": state,
                     "source": "transmission",
                     "source_id": int(item.get("id") or 0),
@@ -575,11 +599,11 @@ def torrent_table(
     width = terminal_width or shutil.get_terminal_size((140, 24)).columns
     color = terminal_supports_color() if use_color is None else use_color
     id_width = max(2, max((len(str(value)) for value in ids.values()), default=1))
-    prefix_width = id_width + 51
+    prefix_width = id_width + 59
     name_width = max(1, width - prefix_width)
     header = (
         f"{'#':>{id_width}} {'DONE':>7} {'TOTAL':>10} {'DOWN':>10} "
-        f"{'UP':>10} {'ETA':>8} NAME"
+        f"{'UP':>10} {'ETA':>8} {'SEEDS':>7} NAME"
     )
     rows = [
         styled(header, ANSI_BOLD_CYAN, color),
@@ -614,6 +638,12 @@ def torrent_table(
                 " ",
                 styled(f"{eta:>8}", ANSI_YELLOW, color),
                 " ",
+                styled(
+                    f"{known_seed_count(torrent.get('seeds')):>7}",
+                    ANSI_WHITE,
+                    color,
+                ),
+                " ",
             )
         )
         rows.append(f"{row_prefix}{styled(name, ANSI_WHITE, color)}")
@@ -632,7 +662,7 @@ def torrent_table(
             f"{format_bytes(total_size):>10} "
             f"{format_rate(total_down):>10} "
             f"{format_rate(total_up):>10} "
-            f"{'--':>8} TOTAL ({len(torrents)})",
+            f"{'--':>8} {'':>7} TOTAL ({len(torrents)})",
         ]
     )
     return "\n".join(rows)
@@ -647,6 +677,10 @@ def filtered_torrents(
     for torrent in qbit.torrents():
         item = dict(torrent)
         item["source"] = "qbittorrent"
+        item["seeds"] = known_seed_count(
+            item.get("num_complete"),
+            item.get("num_seeds"),
+        )
         torrents.append(item)
     if transmission is not None:
         torrents.extend(transmission.torrents())
@@ -700,7 +734,7 @@ def tui_rows(
     """Build scrollable display rows without embedding terminal control codes."""
     id_width = max(2, max((len(str(value)) for value in ids.values()), default=1))
     # Two leading cells are reserved for the selection marker and its space.
-    prefix_width = id_width + 53
+    prefix_width = id_width + 61
     rows: list[dict | None] = []
     for index, torrent in enumerate(torrents):
         torrent_id = ids[str(torrent.get("hash") or "").casefold()]
@@ -713,6 +747,7 @@ def tui_rows(
             "down": f"{format_rate(torrent.get('dlspeed') or 0):>10}",
             "up": f"{format_rate(torrent.get('upspeed') or 0):>10}",
             "eta": f"{format_eta(torrent.get('eta')):>8}",
+            "seeds": f"{known_seed_count(torrent.get('seeds')):>7}",
             "active": bool(
                 int(torrent.get("dlspeed") or 0) + int(torrent.get("upspeed") or 0)
             ),
@@ -734,6 +769,7 @@ def tui_attributes() -> dict[str, int]:
         "down": curses.A_BOLD,
         "up": 0,
         "eta": 0,
+        "seeds": curses.A_BOLD,
         "name": 0,
         "selected": curses.A_BOLD,
         "qbittorrent": curses.A_BOLD,
@@ -759,6 +795,7 @@ def tui_attributes() -> dict[str, int]:
         "down": curses.COLOR_GREEN,
         "up": curses.COLOR_MAGENTA,
         "eta": curses.COLOR_YELLOW,
+        "seeds": curses.COLOR_WHITE,
         "name": curses.COLOR_WHITE,
         "selected": curses.COLOR_YELLOW,
         "qbittorrent": curses.COLOR_CYAN,
@@ -961,6 +998,7 @@ def sort_torrents(
         "done": "progress",
         "down": "dlspeed",
         "up": "upspeed",
+        "seeds": "seeds",
     }
     field = value_fields.get(sort_key)
     if field is None:
@@ -995,6 +1033,7 @@ def header_sort_key(mouse_x: int, inner_x: int, id_width: int) -> str | None:
         ("down", 10),
         ("up", 10),
         ("eta", 8),
+        ("seeds", 7),
     ):
         if x <= mouse_x < x + field_width:
             return key
@@ -1263,6 +1302,7 @@ def draw_tui(
         f"{sort_header_label('DOWN', 'down', 10, sort_key, sort_descending)} "
         f"{sort_header_label('UP', 'up', 10, sort_key, sort_descending)} "
         f"{sort_header_label('ETA', 'eta', 8, sort_key, sort_descending)} "
+        f"{sort_header_label('SEEDS', 'seeds', 7, sort_key, sort_descending)} "
         f"{sort_header_label('NAME', 'name', None, sort_key, sort_descending)}"
     )
     tui_addstr(screen, 4, inner_x, header, attributes["header"], inner_width)
@@ -1295,6 +1335,7 @@ def draw_tui(
             ("down", row["down"], 10),
             ("up", row["up"], 10),
             ("eta", row["eta"], 8),
+            ("seeds", row["seeds"], 7),
         ):
             tui_addstr(
                 screen,
