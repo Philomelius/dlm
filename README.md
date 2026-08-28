@@ -201,6 +201,23 @@ key for search, action menus, and delete confirmation. Press `q` to close DLM.
 qBittorrent 5.2 has one stop operation rather than separate pause and stop
 operations, so DLM labels that action `PAUSE / STOP`.
 
+### Apple Terminal Shift+Arrow setup
+
+Apple Terminal can send Shift+Up/Down as ordinary, unmodified arrows, which
+makes the Shift key invisible to every remote CLI application. In Terminal →
+Settings → Profiles → Keyboard, add these two mappings to the profile used for
+SSH:
+
+| Key | Action | Sequence |
+| --- | --- | --- |
+| Shift+Cursor Up | Send Text | `ESC [ 1 ; 2 A` |
+| Shift+Cursor Down | Send Text | `ESC [ 1 ; 2 B` |
+
+Enter each sequence as a literal Escape character followed by the remaining
+characters (press Esc in the value field, then type `[1;2A` or `[1;2B`). Open a
+new Terminal window after saving. DLM accepts these standard xterm sequences,
+including when they are split during an SSH connection.
+
 Choose another refresh interval:
 
 ```sh
