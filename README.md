@@ -34,7 +34,8 @@ qBittorrent torrents.
   cyan `QB` and magenta `TR` badges;
 - full-screen retro dashboard with a bordered layout and live queue totals;
 - color-coded columns and spacing between torrent entries;
-- high-contrast torrent numbers and a yellow `>` selection marker;
+- high-contrast torrent numbers, a yellow `>` cursor, and `+` markers for a
+  multi-torrent selection;
 - clickable `#`, `DONE`, `DOWN`, `UP`, `ETA`, `SEEDS`, and `NAME` sorting
   headers;
 - clickable `ACTIVE` and top-line `DOWN` controls for changing qBittorrent's
@@ -43,8 +44,9 @@ qBittorrent torrents.
 - name search with live filtering;
 - paste and validate a magnet URI directly from the dashboard with `a`, then
   add it to qBittorrent's managed download queue;
-- an Enter-key action menu for starting, pausing/stopping, or deleting selected
-  qBittorrent and Transmission torrents;
+- contiguous multi-selection with Shift+Up/Down and one Enter-key action menu
+  for starting, pausing/stopping, or deleting every selected qBittorrent and
+  Transmission torrent;
 - every torrent stays on one data row with a blank spacer beneath it;
 - long names are truncated with an ellipsis; Right Arrow toggles scrolling for
   the selected torrent name only;
@@ -136,6 +138,12 @@ Selecting another torrent stops name scrolling automatically. Use Up/Down or
 first and last torrent. Mouse-wheel events are ignored, so scrolling is
 keyboard-only.
 
+Hold Shift and press Up or Down to select a contiguous group. The active cursor
+remains `>` and the other selected torrents are marked `+`; reversing direction
+shrinks the selection. Press Enter to open one action menu for the whole group,
+including mixed `QB` and `TR` selections. A normal navigation key returns to a
+single cursor, while Esc clears the current multi-selection without moving it.
+
 Click `#`, `DONE`, `DOWN`, `UP`, `ETA`, `SEEDS`, or `NAME` to reorder the
 visible torrents. `#` sorts by DLM's persistent torrent number across both
 clients. `SEEDS` is the highest known swarm seeder count reported by
@@ -156,6 +164,7 @@ Mouse-wheel scrolling remains disabled.
 - Home or `g` selects the first torrent;
 - End or `G` selects the final torrent;
 - Ctrl+Up jumps to the first torrent and Ctrl+Down jumps to the final torrent;
+- Shift+Up/Down extends or shrinks the multi-torrent selection;
 - Right Arrow toggles scrolling for the selected torrent's name;
 - two quick Up presses move one page up, while two quick Down presses move one
   page down; a single arrow press still moves immediately by one torrent;
@@ -172,17 +181,18 @@ to qBittorrent. The torrent starts when a download slot is available; otherwise
 it remains queued. Invalid input stays in the dialog for correction, and Esc
 cancels without adding anything.
 
-Press Enter on any selected torrent to open its action menu:
+Press Enter on the current torrent or multi-selection to open its action menu:
 
-- `START / RESUME` starts the selected torrent;
-- `PAUSE / STOP` stops the selected torrent;
-- `DELETE + DATA` removes the torrent and its downloaded files after a second
-  confirmation dialog.
+- `START / RESUME` starts every selected torrent;
+- `PAUSE / STOP` stops every selected torrent;
+- `DELETE + DATA` removes every selected torrent and all of its downloaded
+  files after a second confirmation dialog.
 
 For a `QB` entry, start is governed by DLM's configured qBittorrent active-
 download limit. For a `TR` entry, DLM sends `torrent-start`, `torrent-stop`, or
 `torrent-remove` to Transmission's RPC service using that torrent's actual
-Transmission ID. Destructive removal sets `delete-local-data=true`, so
+Transmission ID. Mixed selections are grouped into one request per client for
+responsive batch actions. Destructive removal sets `delete-local-data=true`, so
 `DELETE + DATA` permanently removes the Transmission torrent and its media
 from Beast.
 

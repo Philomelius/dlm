@@ -61,13 +61,17 @@ ANSI_YELLOW = "\033[93m"
 ANSI_WHITE = "\033[97m"
 TUI_MIN_WIDTH = 74
 TUI_MIN_HEIGHT = 12
-TUI_INPUT_TIMEOUT_MS = 20
+TUI_INPUT_TIMEOUT_MS = 30
 TUI_ESCAPE_DELAY_MS = 25
 TUI_DOUBLE_ARROW_SECONDS = 0.35
 # ncurses' xterm extended-key codes for kUP5 and kDN5. Python exposes these
 # through getch() even though they sit above curses.KEY_MAX.
 TUI_CTRL_UP = 567
 TUI_CTRL_DOWN = 526
+# xterm's Shift+Up/Down sequences are not exposed consistently by Python's
+# curses module, so DLM assigns stable application key codes to them.
+TUI_SHIFT_UP = 568
+TUI_SHIFT_DOWN = 527
 TUI_ACTIONS = (
     ("START / RESUME", "start"),
     ("PAUSE / STOP", "stop"),
@@ -494,16 +498,33 @@ class Transmission:
             return dict(payload.get("arguments") or {})
         raise RuntimeError("Transmission RPC session negotiation failed")
 
-    def start(self, torrent_id: int | str) -> None:
-        self.call("torrent-start", {"ids": [torrent_id]})
+    @staticmethod
+    def _ids(
+        torrent_ids: int | str | list[int | str] | tuple[int | str, ...],
+    ) -> list[int | str]:
+        if isinstance(torrent_ids, (list, tuple)):
+            return list(torrent_ids)
+        return [torrent_ids]
 
-    def stop(self, torrent_id: int | str) -> None:
-        self.call("torrent-stop", {"ids": [torrent_id]})
+    def start(
+        self,
+        torrent_ids: int | str | list[int | str] | tuple[int | str, ...],
+    ) -> None:
+        self.call("torrent-start", {"ids": self._ids(torrent_ids)})
 
-    def remove_with_files(self, torrent_id: int | str) -> None:
+    def stop(
+        self,
+        torrent_ids: int | str | list[int | str] | tuple[int | str, ...],
+    ) -> None:
+        self.call("torrent-stop", {"ids": self._ids(torrent_ids)})
+
+    def remove_with_files(
+        self,
+        torrent_ids: int | str | list[int | str] | tuple[int | str, ...],
+    ) -> None:
         self.call(
             "torrent-remove",
-            {"ids": [torrent_id], "delete-local-data": True},
+            {"ids": self._ids(torrent_ids), "delete-local-data": True},
         )
 
     def torrents(self) -> list[dict]:
@@ -740,6 +761,7 @@ def tui_rows(
         torrent_id = ids[str(torrent.get("hash") or "").casefold()]
         common = {
             "torrent_index": index,
+            "hash": str(torrent.get("hash") or "").casefold(),
             "id": f"{torrent_id:>{id_width}}",
             "source": torrent_source(torrent),
             "done": f"{float(torrent.get('progress') or 0) * 100:6.2f}%",
@@ -1145,6 +1167,29 @@ def navigation_selection(
     return selected_index
 
 
+def extend_torrent_selection(
+    torrents: list[dict],
+    selected_index: int,
+    anchor_hash: str | None,
+    direction: int,
+) -> tuple[int, str | None, set[str]]:
+    """Extend or shrink one contiguous selection with Shift+Up/Down."""
+    if not torrents:
+        return 0, None, set()
+    selected_index = min(max(0, selected_index), len(torrents) - 1)
+    current_hash = str(torrents[selected_index].get("hash") or "").casefold()
+    hashes = [str(torrent.get("hash") or "").casefold() for torrent in torrents]
+    if not anchor_hash or anchor_hash not in hashes:
+        anchor_hash = current_hash
+    new_index = min(
+        len(torrents) - 1,
+        max(0, selected_index + (-1 if direction < 0 else 1)),
+    )
+    anchor_index = hashes.index(anchor_hash)
+    first, last = sorted((anchor_index, new_index))
+    return new_index, anchor_hash, set(hashes[first : last + 1])
+
+
 class ArrowTapTracker:
     """Accelerate a double arrow tap without delaying a normal single tap."""
 
@@ -1209,12 +1254,52 @@ def configure_tui_input(screen: curses.window) -> None:
     for sequence, key_code in (
         ("\x1b[1;5A", TUI_CTRL_UP),
         ("\x1b[1;5B", TUI_CTRL_DOWN),
+        ("\x1b[1;2A", TUI_SHIFT_UP),
+        ("\x1b[1;2B", TUI_SHIFT_DOWN),
     ):
         try:
             curses.define_key(sequence, key_code)
         except (AttributeError, curses.error):
             pass
     screen.timeout(TUI_INPUT_TIMEOUT_MS)
+
+
+def decode_tui_key(screen: curses.window, key: int) -> int:
+    """Reassemble modified arrows when curses reports their leading Escape."""
+    if key != 27:
+        return key
+    sequences = {
+        (ord("["), ord("1"), ord(";"), ord("5"), ord("A")): TUI_CTRL_UP,
+        (ord("["), ord("1"), ord(";"), ord("5"), ord("B")): TUI_CTRL_DOWN,
+        (ord("["), ord("1"), ord(";"), ord("2"), ord("A")): TUI_SHIFT_UP,
+        (ord("["), ord("1"), ord(";"), ord("2"), ord("B")): TUI_SHIFT_DOWN,
+    }
+    prefixes = {
+        sequence[:length]
+        for sequence in sequences
+        for length in range(1, len(sequence) + 1)
+    }
+    buffered: list[int] = []
+    screen.timeout(TUI_ESCAPE_DELAY_MS)
+    try:
+        while len(buffered) < 5:
+            following = screen.getch()
+            if following == -1:
+                break
+            buffered.append(following)
+            candidate = tuple(buffered)
+            if candidate in sequences:
+                return sequences[candidate]
+            if candidate not in prefixes:
+                break
+    finally:
+        screen.timeout(TUI_INPUT_TIMEOUT_MS)
+    for buffered_key in reversed(buffered):
+        try:
+            curses.ungetch(buffered_key)
+        except curses.error:
+            break
+    return key
 
 
 def pending_key(screen: curses.window) -> int:
@@ -1242,6 +1327,7 @@ def draw_tui(
     marquee_elapsed: float,
     sort_key: str | None,
     sort_descending: bool,
+    selected_hashes: set[str],
 ) -> tuple[int, int, list[dict | None]]:
     screen.erase()
     height, width = screen.getmaxyx()
@@ -1317,8 +1403,9 @@ def draw_tui(
         if row is None:
             continue
         y = content_top + offset
-        selected = int(row["torrent_index"]) == selected_index
-        marker = ">" if selected else " "
+        active_cursor = int(row["torrent_index"]) == selected_index
+        selected = active_cursor or str(row["hash"]) in selected_hashes
+        marker = ">" if active_cursor else "+" if selected else " "
         tui_addstr(
             screen,
             y,
@@ -1364,7 +1451,7 @@ def draw_tui(
         visible_name = visible_torrent_name(
             full_name,
             name_width,
-            selected,
+            active_cursor,
             marquee_active,
             marquee_elapsed,
         )
@@ -1393,15 +1480,15 @@ def draw_tui(
         status = (
             f"[ENTER] ACTION  [A] ADD MAGNET  [S] SEARCH  [Q] QUIT  "
             f"[CLICK HEADER] SORT  "
-            f"[UP/DOWN] SELECT  [RIGHT] NAME SCROLL  "
+            f"[UP/DOWN] MOVE  [SHIFT+UP/DOWN] MULTI  [RIGHT] NAME SCROLL  "
             f"[PGUP/PGDN] PAGE  [HOME/END] JUMP  //  AUTO {interval:g}s"
         )
         if search_query:
             status = f"[ESC] CLEAR SEARCH  //  {status}"
         status_attribute = attributes["footer"]
-    position = (
-        f"{selected_index + 1}/{len(torrents)}" if torrents else "0/0"
-    )
+    position = f"{selected_index + 1}/{len(torrents)}" if torrents else "0/0"
+    if len(selected_hashes) > 1:
+        position = f"{len(selected_hashes)} SEL // {position}"
     tui_addstr(
         screen,
         height - 2,
@@ -1676,6 +1763,47 @@ def choose_torrent_action(
     return "delete" if confirmation == "delete" else None
 
 
+def choose_torrent_actions(
+    screen: curses.window,
+    torrents: list[dict],
+    torrent_ids: list[int],
+    attributes: dict[str, int],
+) -> str | None:
+    if not torrents:
+        return None
+    if len(torrents) == 1:
+        return choose_torrent_action(
+            screen,
+            torrents[0],
+            torrent_ids[0],
+            attributes,
+        )
+    qb_count = sum(
+        torrent_source(torrent) != "transmission" for torrent in torrents
+    )
+    tr_count = len(torrents) - qb_count
+    numbers = ", ".join(f"#{torrent_id}" for torrent_id in torrent_ids)
+    action = modal_menu(
+        screen,
+        f"{len(torrents)} TORRENTS // ACTION",
+        f"QB {qb_count} // TR {tr_count} // {numbers}",
+        TUI_ACTIONS,
+        attributes,
+    )
+    if action != "delete":
+        return action
+    confirmation = modal_menu(
+        screen,
+        "PERMANENT BATCH DELETE",
+        f"{len(torrents)} torrents and all their downloaded data",
+        (
+            ("CONFIRM DELETE ALL SELECTED TORRENTS + DATA", "delete"),
+        ),
+        attributes,
+    )
+    return "delete" if confirmation == "delete" else None
+
+
 def execute_tui_action(
     qbit: QBittorrent,
     torrent: dict,
@@ -1717,6 +1845,64 @@ def execute_tui_action(
     raise RuntimeError(f"Unknown torrent action: {action}")
 
 
+def execute_tui_actions(
+    qbit: QBittorrent,
+    torrents: list[dict],
+    action: str,
+    transmission: Transmission | None = None,
+) -> str:
+    """Apply one dashboard action to a mixed-client torrent selection."""
+    if not torrents:
+        raise RuntimeError("No torrents are selected")
+    if len(torrents) == 1:
+        return execute_tui_action(qbit, torrents[0], action, transmission)
+    if action not in {"start", "stop", "delete"}:
+        raise RuntimeError(f"Unknown torrent action: {action}")
+
+    qbit_hashes: list[str] = []
+    transmission_ids: list[int | str] = []
+    for torrent in torrents:
+        if torrent_source(torrent) == "transmission":
+            if transmission is None:
+                raise RuntimeError("Transmission RPC is unavailable")
+            torrent_id: int | str = int(torrent.get("source_id") or 0)
+            if not torrent_id:
+                torrent_id = str(torrent.get("source_hash") or "")
+            if not torrent_id:
+                raise RuntimeError(
+                    "A selected Transmission torrent has no RPC ID"
+                )
+            transmission_ids.append(torrent_id)
+        else:
+            torrent_hash = str(torrent.get("hash") or "")
+            if not torrent_hash:
+                raise RuntimeError("A selected torrent has no hash")
+            qbit_hashes.append(torrent_hash)
+
+    qbit_batch = "|".join(qbit_hashes)
+    if action == "start":
+        if qbit_hashes:
+            qbit.configure_queue()
+            qbit.start(qbit_batch)
+        if transmission_ids:
+            assert transmission is not None
+            transmission.start(transmission_ids)
+        return f"STARTED {len(torrents)} TORRENTS"
+    if action == "stop":
+        if qbit_hashes:
+            qbit.stop(qbit_batch)
+        if transmission_ids:
+            assert transmission is not None
+            transmission.stop(transmission_ids)
+        return f"PAUSED / STOPPED {len(torrents)} TORRENTS"
+    if qbit_hashes:
+        qbit.remove_with_files(qbit_batch)
+    if transmission_ids:
+        assert transmission is not None
+        transmission.remove_with_files(transmission_ids)
+    return f"DELETED {len(torrents)} TORRENTS + DATA"
+
+
 def _run_tui(
     screen: curses.window,
     qbit: QBittorrent,
@@ -1747,6 +1933,8 @@ def _run_tui(
     marquee_started_at = time.monotonic()
     sort_key: str | None = None
     sort_descending = True
+    selected_hashes: set[str] = set()
+    selection_anchor_hash: str | None = None
     last_header_click_key: str | None = None
     last_header_click_at = 0.0
 
@@ -1758,7 +1946,7 @@ def _run_tui(
         if now >= next_refresh and queued_key == -1:
             try:
                 selected_hash = (
-                    str(torrents[selected_index].get("hash") or "")
+                    str(torrents[selected_index].get("hash") or "").casefold()
                     if torrents and selected_index < len(torrents)
                     else ""
                 )
@@ -1779,20 +1967,33 @@ def _run_tui(
                         (
                             index
                             for index, torrent in enumerate(torrents)
-                            if str(torrent.get("hash") or "") == selected_hash
+                            if (
+                                str(torrent.get("hash") or "").casefold()
+                                == selected_hash
+                            )
                         ),
                         min(selected_index, max(0, len(torrents) - 1)),
                     )
                 else:
                     selected_index = min(selected_index, max(0, len(torrents) - 1))
                 current_hash = (
-                    str(torrents[selected_index].get("hash") or "")
+                    str(torrents[selected_index].get("hash") or "").casefold()
                     if torrents and selected_index < len(torrents)
                     else ""
                 )
                 if current_hash != selected_hash:
                     marquee_active = False
                     marquee_started_at = now
+                    selected_hashes.clear()
+                    selection_anchor_hash = None
+                visible_hashes = {
+                    str(torrent.get("hash") or "").casefold()
+                    for torrent in torrents
+                }
+                selected_hashes.intersection_update(visible_hashes)
+                if selection_anchor_hash not in visible_hashes:
+                    selection_anchor_hash = None
+                    selected_hashes.clear()
                 error = None
             except Exception as refresh_error:
                 error = str(refresh_error)
@@ -1815,12 +2016,16 @@ def _run_tui(
             max(0.0, time.monotonic() - marquee_started_at),
             sort_key,
             sort_descending,
+            selected_hashes,
         )
         scroll = min(
             max_scroll,
             ensure_selected_visible(rows, selected_index, scroll, page_size),
         )
-        key = queued_key if queued_key != -1 else screen.getch()
+        key = decode_tui_key(
+            screen,
+            queued_key if queued_key != -1 else screen.getch(),
+        )
         if key not in {curses.KEY_UP, curses.KEY_DOWN}:
             arrow_taps.reset()
         if key in {ord("q"), ord("Q")}:
@@ -1931,6 +2136,8 @@ def _run_tui(
                 id_map,
             )
             selected_index = 0
+            selected_hashes.clear()
+            selection_anchor_hash = None
             marquee_active = False
             marquee_started_at = click_time
             scroll = 0
@@ -1947,10 +2154,18 @@ def _run_tui(
                 id_map,
             )
             selected_index = 0
+            selected_hashes.clear()
+            selection_anchor_hash = None
             marquee_active = False
             marquee_started_at = time.monotonic()
             scroll = 0
             notice = "SEARCH CLEARED"
+            notice_until = time.monotonic() + 2
+            continue
+        if key == 27 and selected_hashes:
+            selected_hashes.clear()
+            selection_anchor_hash = None
+            notice = "MULTI-SELECTION CLEARED"
             notice_until = time.monotonic() + 2
             continue
         if key in {ord("s"), ord("S")}:
@@ -1968,6 +2183,8 @@ def _run_tui(
                     id_map,
                 )
                 selected_index = 0
+                selected_hashes.clear()
+                selection_anchor_hash = None
                 marquee_active = False
                 marquee_started_at = time.monotonic()
                 scroll = 0
@@ -1995,6 +2212,29 @@ def _run_tui(
             next_refresh = 0.0
             continue
 
+        shift_up_keys = {TUI_SHIFT_UP}
+        shift_down_keys = {TUI_SHIFT_DOWN}
+        if hasattr(curses, "KEY_SR"):
+            shift_up_keys.add(curses.KEY_SR)
+        if hasattr(curses, "KEY_SF"):
+            shift_down_keys.add(curses.KEY_SF)
+        if key in shift_up_keys | shift_down_keys and torrents:
+            direction = -1 if key in shift_up_keys else 1
+            selected_index, selection_anchor_hash, selected_hashes = (
+                extend_torrent_selection(
+                    torrents,
+                    selected_index,
+                    selection_anchor_hash,
+                    direction,
+                )
+            )
+            marquee_active = False
+            marquee_started_at = time.monotonic()
+            scroll = ensure_selected_visible(
+                rows, selected_index, scroll, page_size
+            )
+            continue
+
         new_selection = arrow_taps.navigate(
             key,
             rows,
@@ -2004,6 +2244,8 @@ def _run_tui(
         )
         if new_selection != selected_index:
             selected_index = new_selection
+            selected_hashes.clear()
+            selection_anchor_hash = None
             marquee_active = False
             marquee_started_at = time.monotonic()
             scroll = ensure_selected_visible(
@@ -2011,11 +2253,47 @@ def _run_tui(
             )
             continue
 
+        navigation_keys = {
+            curses.KEY_DOWN,
+            curses.KEY_UP,
+            curses.KEY_NPAGE,
+            curses.KEY_PPAGE,
+            curses.KEY_HOME,
+            curses.KEY_END,
+            TUI_CTRL_UP,
+            TUI_CTRL_DOWN,
+            ord("j"),
+            ord("J"),
+            ord("k"),
+            ord("K"),
+            ord("g"),
+            ord("G"),
+            ord(" "),
+        }
+        if key in navigation_keys and selected_hashes:
+            selected_hashes.clear()
+            selection_anchor_hash = None
+            continue
+
         if key in {curses.KEY_ENTER, 10, 13} and torrents:
-            selected = torrents[selected_index]
-            torrent_id = id_map[str(selected.get("hash") or "").casefold()]
-            action = choose_torrent_action(
-                screen, selected, torrent_id, attributes
+            active_hash = str(
+                torrents[selected_index].get("hash") or ""
+            ).casefold()
+            action_hashes = set(selected_hashes) or {active_hash}
+            selected_torrents = [
+                torrent
+                for torrent in torrents
+                if str(torrent.get("hash") or "").casefold() in action_hashes
+            ]
+            selected_ids = [
+                id_map[str(torrent.get("hash") or "").casefold()]
+                for torrent in selected_torrents
+            ]
+            action = choose_torrent_actions(
+                screen,
+                selected_torrents,
+                selected_ids,
+                attributes,
             )
             if action is None:
                 next_refresh = max(
@@ -2024,10 +2302,23 @@ def _run_tui(
                 )
             if action:
                 try:
-                    result = execute_tui_action(
-                        qbit, selected, action, transmission
+                    result = execute_tui_actions(
+                        qbit,
+                        selected_torrents,
+                        action,
+                        transmission,
                     )
-                    notice = f"{result} // #{torrent_id} {selected.get('name') or '(unnamed)'}"
+                    if len(selected_torrents) == 1:
+                        selected = selected_torrents[0]
+                        notice = (
+                            f"{result} // #{selected_ids[0]} "
+                            f"{selected.get('name') or '(unnamed)'}"
+                        )
+                    else:
+                        numbers = ", ".join(
+                            f"#{torrent_id}" for torrent_id in selected_ids
+                        )
+                        notice = f"{result} // {numbers}"
                 except Exception as action_error:
                     notice = f"ERROR // {action_error}"
                 notice_until = time.monotonic() + 4

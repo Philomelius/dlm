@@ -10,14 +10,20 @@ from dlm import (
     QBittorrent,
     TUI_CTRL_DOWN,
     TUI_CTRL_UP,
+    TUI_ESCAPE_DELAY_MS,
+    TUI_SHIFT_DOWN,
+    TUI_SHIFT_UP,
     TUI_INPUT_TIMEOUT_MS,
     TUI_ACTIONS,
     Transmission,
     TorrentIds,
     add_magnet_to_queue,
     command_remove,
+    decode_tui_key,
     ensure_selected_visible,
     execute_tui_action,
+    execute_tui_actions,
+    extend_torrent_selection,
     filter_torrents,
     filtered_torrents,
     header_sort_key,
@@ -155,6 +161,7 @@ class DlmTests(unittest.TestCase):
         self.assertEqual(rows[0]["torrent_index"], 0)
         self.assertEqual(rows[2]["torrent_index"], 1)
         self.assertEqual(rows[0]["name"], torrents[0]["name"])
+        self.assertEqual(rows[0]["hash"], "a")
         self.assertEqual(rows[0]["seeds"], "     13")
         self.assertEqual(prefix_width, 63)
 
@@ -272,6 +279,56 @@ class DlmTests(unittest.TestCase):
         transmission.remove_with_files.assert_called_once_with(17)
         qbit.assert_not_called()
 
+    def test_batch_actions_group_torrents_by_client(self):
+        qbit = Mock()
+        transmission = Mock()
+        torrents = [
+            {"hash": "qbit-a"},
+            {
+                "hash": "transmission:abc",
+                "source": "transmission",
+                "source_id": 17,
+            },
+            {"hash": "qbit-b"},
+        ]
+
+        self.assertEqual(
+            execute_tui_actions(qbit, torrents, "start", transmission),
+            "STARTED 3 TORRENTS",
+        )
+        qbit.configure_queue.assert_called_once_with()
+        qbit.start.assert_called_once_with("qbit-a|qbit-b")
+        transmission.start.assert_called_once_with([17])
+
+        qbit.reset_mock()
+        transmission.reset_mock()
+        self.assertEqual(
+            execute_tui_actions(qbit, torrents, "stop", transmission),
+            "PAUSED / STOPPED 3 TORRENTS",
+        )
+        qbit.stop.assert_called_once_with("qbit-a|qbit-b")
+        transmission.stop.assert_called_once_with([17])
+
+        qbit.reset_mock()
+        transmission.reset_mock()
+        self.assertEqual(
+            execute_tui_actions(qbit, torrents, "delete", transmission),
+            "DELETED 3 TORRENTS + DATA",
+        )
+        qbit.remove_with_files.assert_called_once_with("qbit-a|qbit-b")
+        transmission.remove_with_files.assert_called_once_with([17])
+
+    def test_batch_action_validation_happens_before_any_client_is_changed(self):
+        qbit = Mock()
+        torrents = [
+            {"hash": "qbit-a"},
+            {"hash": "transmission:abc", "source": "transmission"},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "Transmission RPC"):
+            execute_tui_actions(qbit, torrents, "stop")
+        qbit.assert_not_called()
+
     def test_transmission_actions_use_expected_remote_rpc_calls(self):
         transmission = Transmission("http://transmission.invalid/rpc")
         transmission.call = Mock(return_value={})
@@ -290,6 +347,12 @@ class DlmTests(unittest.TestCase):
         transmission.call.assert_called_once_with(
             "torrent-remove",
             {"ids": [7], "delete-local-data": True},
+        )
+
+        transmission.call.reset_mock()
+        transmission.start([7, "hash"])
+        transmission.call.assert_called_once_with(
+            "torrent-start", {"ids": [7, "hash"]}
         )
 
     def test_tui_stats_summarize_the_queue(self):
@@ -552,6 +615,7 @@ class DlmTests(unittest.TestCase):
 
     def test_page_home_top_and_end_navigation(self):
         self.assertEqual((TUI_CTRL_UP, TUI_CTRL_DOWN), (567, 526))
+        self.assertEqual((TUI_SHIFT_UP, TUI_SHIFT_DOWN), (568, 527))
         torrents = [
             {"hash": str(index), "name": f"Torrent {index}", "size": 0}
             for index in range(10)
@@ -593,6 +657,32 @@ class DlmTests(unittest.TestCase):
             navigation_selection(TUI_CTRL_DOWN, rows, 0, 5, 10),
             9,
         )
+
+    def test_shift_arrows_extend_and_shrink_a_contiguous_selection(self):
+        torrents = [
+            {"hash": letter, "name": letter.upper()}
+            for letter in ("a", "b", "c", "d")
+        ]
+
+        index, anchor, selected = extend_torrent_selection(
+            torrents, 1, None, 1
+        )
+        self.assertEqual((index, anchor, selected), (2, "b", {"b", "c"}))
+
+        index, anchor, selected = extend_torrent_selection(
+            torrents, index, anchor, 1
+        )
+        self.assertEqual((index, anchor, selected), (3, "b", {"b", "c", "d"}))
+
+        index, anchor, selected = extend_torrent_selection(
+            torrents, index, anchor, -1
+        )
+        self.assertEqual((index, anchor, selected), (2, "b", {"b", "c"}))
+
+        index, anchor, selected = extend_torrent_selection(
+            torrents, index, anchor, -1
+        )
+        self.assertEqual((index, anchor, selected), (1, "b", {"b"}))
 
     def test_double_arrow_taps_move_by_a_page_without_single_tap_delay(self):
         torrents = [
@@ -668,6 +758,26 @@ class DlmTests(unittest.TestCase):
             screen.timeout.call_args_list,
             [call(0), call(TUI_INPUT_TIMEOUT_MS)],
         )
+
+    def test_split_modified_arrow_sequences_are_reassembled(self):
+        cases = (
+            ("[1;5A", TUI_CTRL_UP),
+            ("[1;5B", TUI_CTRL_DOWN),
+            ("[1;2A", TUI_SHIFT_UP),
+            ("[1;2B", TUI_SHIFT_DOWN),
+        )
+        for sequence, expected in cases:
+            with self.subTest(sequence=sequence):
+                screen = Mock()
+                screen.getch.side_effect = [ord(value) for value in sequence]
+                self.assertEqual(decode_tui_key(screen, 27), expected)
+                self.assertEqual(
+                    screen.timeout.call_args_list,
+                    [
+                        call(TUI_ESCAPE_DELAY_MS),
+                        call(TUI_INPUT_TIMEOUT_MS),
+                    ],
+                )
 
     def test_remove_explicitly_deletes_downloaded_files(self):
         qbit = QBittorrent.__new__(QBittorrent)
